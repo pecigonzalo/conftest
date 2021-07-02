@@ -19,6 +19,7 @@ import (
 	"github.com/open-policy-agent/conftest/parser/ini"
 	"github.com/open-policy-agent/conftest/parser/json"
 	"github.com/open-policy-agent/conftest/parser/jsonnet"
+	"github.com/open-policy-agent/conftest/parser/properties"
 	"github.com/open-policy-agent/conftest/parser/toml"
 	"github.com/open-policy-agent/conftest/parser/vcl"
 	"github.com/open-policy-agent/conftest/parser/xml"
@@ -28,20 +29,21 @@ import (
 // The defined parsers are the parsers that are valid for
 // parsing files.
 const (
-	TOML       = "toml"
+	CUE        = "cue"
+	Dockerfile = "dockerfile"
+	EDN        = "edn"
 	HCL1       = "hcl1"
 	HCL2       = "hcl2"
-	CUE        = "cue"
-	INI        = "ini"
 	HOCON      = "hocon"
-	Dockerfile = "dockerfile"
-	YAML       = "yaml"
+	IGNORE     = "ignore"
+	INI        = "ini"
 	JSON       = "json"
 	JSONNET    = "jsonnet"
-	EDN        = "edn"
+	PROPERTIES = "properties"
+	TOML       = "toml"
 	VCL        = "vcl"
 	XML        = "xml"
-	IGNORE     = "ignore"
+	YAML       = "yaml"
 )
 
 // Parser defines all of the methods that every parser
@@ -81,6 +83,8 @@ func New(parser string) (Parser, error) {
 		return &xml.Parser{}, nil
 	case IGNORE:
 		return &ignore.Parser{}, nil
+	case PROPERTIES:
+		return &properties.Parser{}, nil
 	default:
 		return nil, fmt.Errorf("unknown parser: %v", parser)
 	}
@@ -89,32 +93,32 @@ func New(parser string) (Parser, error) {
 // NewFromPath returns a file parser based on the file type
 // that exists at the given path.
 func NewFromPath(path string) (Parser, error) {
+
+	// We use the YAML parser as the default when passing in configuration
+	// data through standard input. This can be overridden by using the parser flag.
 	if path == "-" {
 		return New(YAML)
 	}
 
 	fileName := strings.ToLower(filepath.Base(path))
-	if fileName == "dockerfile" || strings.Contains(fileName, "dockerfile.") {
-		return New(Dockerfile)
-	}
 
-	// The yml file extension is the default when a file extension
-	// was not found.
 	fileExtension := "yml"
 	if len(filepath.Ext(path)) > 0 {
-		fileExtension = filepath.Ext(path)[1:]
+		fileExtension = strings.ToLower(filepath.Ext(path)[1:])
+	}
+
+	// A Dockerfile can either be a file named Dockerfile, be prefixed with
+	// Dockerfile, or have Dockerfile as its extension.
+	//
+	// For example: Dockerfile, Dockerfile.debug, dev.Dockerfile
+	if fileName == "dockerfile" || strings.HasPrefix(fileName, "dockerfile.") || fileExtension == "dockerfile" {
+		return New(Dockerfile)
 	}
 
 	if fileExtension == "yml" || fileExtension == "yaml" {
 		return New(YAML)
 	}
 
-	if strings.EqualFold(fileExtension, "dockerfile") {
-		return New(Dockerfile)
-	}
-
-	// When parsing Terraform files, the default parser to use
-	// should be the latest HCL parser.
 	if fileExtension == "tf" || fileExtension == "tfvars" {
 		return New(HCL2)
 	}
@@ -134,20 +138,21 @@ func NewFromPath(path string) (Parser, error) {
 // Parsers returns a list of the supported Parsers.
 func Parsers() []string {
 	parsers := []string{
-		TOML,
+		CUE,
+		Dockerfile,
+		EDN,
 		HCL1,
 		HCL2,
-		CUE,
-		INI,
 		HOCON,
-		Dockerfile,
-		YAML,
+		IGNORE,
+		INI,
 		JSON,
 		JSONNET,
-		EDN,
+		PROPERTIES,
+		TOML,
 		VCL,
 		XML,
-		IGNORE,
+		YAML,
 	}
 
 	return parsers

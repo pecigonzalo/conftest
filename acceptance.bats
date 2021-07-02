@@ -153,7 +153,7 @@
 @test "Can parse cue files" {
   run ./conftest test -p examples/cue/policy examples/cue/deployment.cue
   [ "$status" -eq 1 ]
-  [[ "$output" =~ "The image port should be 8080 in deployment.cue. you got : 8081" ]]
+  [[ "$output" =~ "The image port should be 8080 in deployment.cue. you have : 8081" ]]
 }
 
 @test "Can parse ini files" {
@@ -166,6 +166,11 @@
   run ./conftest test -p examples/hcl2/policy examples/hcl2/terraform.tf
   [ "$status" -eq 1 ]
   [[ "$output" =~ "ALB \`my-alb-listener\` is using HTTP rather than HTTP" ]]
+}
+
+@test "Can parse properties files" {
+  run ./conftest test -p examples/properties/policy/ examples/properties/sample.properties
+  [ "$status" -eq 0 ]
 }
 
 @test "Can parse stdin with parser flag" {
@@ -274,6 +279,18 @@
   run ./conftest test -p examples/exceptions/policy examples/exceptions/deployments.yaml --no-color
   [ "$status" -eq 1 ]
   [ "${lines[2]}" = "2 tests, 0 passed, 0 warnings, 1 failure, 1 exception" ]
+}
+
+@test "Exceptions output" {
+  run ./conftest test -p examples/exceptions/policy examples/exceptions/deployments.yaml --no-color
+  [ "$status" -eq 1 ]
+  [[ "${lines[1]}" =~ "EXCP - examples/exceptions/deployments.yaml - main - data.main.exception[_][_] == \"run_as_root\"" ]]
+}
+
+@test "Suppress exceptions output" {
+  run ./conftest test -p examples/exceptions/policy examples/exceptions/deployments.yaml --no-color --suppress-exceptions
+  [ "$status" -eq 1 ]
+  [ "${lines[1]}" = "2 tests, 0 passed, 0 warnings, 1 failure, 1 exception" ]
 }
 
 @test "Can combine yaml files" {

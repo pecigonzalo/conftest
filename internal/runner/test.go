@@ -16,19 +16,20 @@ import (
 // TestRunner is the runner for the Test command, executing
 // Rego policy checks against configuration files.
 type TestRunner struct {
-	Trace         bool
-	Policy        []string
-	Data          []string
-	Update        []string
-	Ignore        string
-	Parser        string
-	Namespace     []string
-	AllNamespaces bool `mapstructure:"all-namespaces"`
-	FailOnWarn    bool `mapstructure:"fail-on-warn"`
-	NoColor       bool `mapstructure:"no-color"`
-	NoFail        bool `mapstructure:"no-fail"`
-	Combine       bool
-	Output        string
+	Trace              bool
+	Policy             []string
+	Data               []string
+	Update             []string
+	Ignore             string
+	Parser             string
+	Namespace          []string
+	AllNamespaces      bool `mapstructure:"all-namespaces"`
+	FailOnWarn         bool `mapstructure:"fail-on-warn"`
+	NoColor            bool `mapstructure:"no-color"`
+	NoFail             bool `mapstructure:"no-fail"`
+	SuppressExceptions bool `mapstructure:"suppress-exceptions"`
+	Combine            bool
+	Output             string
 }
 
 // Run executes the TestRunner, verifying all Rego policies against the given
@@ -60,6 +61,10 @@ func (t *TestRunner) Run(ctx context.Context, fileList []string) ([]output.Check
 	engine, err := policy.LoadWithData(ctx, t.Policy, t.Data)
 	if err != nil {
 		return nil, fmt.Errorf("load: %w", err)
+	}
+
+	if t.Trace {
+		engine.EnableTracing()
 	}
 
 	namespaces := t.Namespace

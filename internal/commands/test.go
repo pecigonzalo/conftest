@@ -82,9 +82,8 @@ func NewTestCommand(ctx context.Context) *cobra.Command {
 		Use:   "test <path> [path [...]]",
 		Short: "Test your configuration files using Open Policy Agent",
 		Long:  testDesc,
-		Args:  cobra.MinimumNArgs(1),
 		PreRunE: func(cmd *cobra.Command, args []string) error {
-			flagNames := []string{"all-namespaces", "combine", "data", "fail-on-warn", "ignore", "namespace", "no-color", "no-fail", "output", "parser", "policy", "trace", "update"}
+			flagNames := []string{"all-namespaces", "combine", "data", "fail-on-warn", "ignore", "namespace", "no-color", "no-fail", "suppress-exceptions", "output", "parser", "policy", "trace", "update"}
 			for _, name := range flagNames {
 				if err := viper.BindPFlag(name, cmd.Flags().Lookup(name)); err != nil {
 					return fmt.Errorf("bind flag: %w", err)
@@ -95,6 +94,11 @@ func NewTestCommand(ctx context.Context) *cobra.Command {
 		},
 
 		RunE: func(cmd *cobra.Command, fileList []string) error {
+			if len(fileList) < 1 {
+				cmd.Usage() //nolint
+				return fmt.Errorf("missing required arguments")
+			}
+
 			var runner runner.TestRunner
 			if err := viper.Unmarshal(&runner); err != nil {
 				return fmt.Errorf("unmarshal parameters: %w", err)
@@ -105,7 +109,7 @@ func NewTestCommand(ctx context.Context) *cobra.Command {
 				return fmt.Errorf("running test: %w", err)
 			}
 
-			outputter := output.Get(runner.Output, output.Options{NoColor: runner.NoColor, Tracing: runner.Trace})
+			outputter := output.Get(runner.Output, output.Options{NoColor: runner.NoColor, SuppressExceptions: runner.SuppressExceptions, Tracing: runner.Trace})
 			if err := outputter.Output(results); err != nil {
 				return fmt.Errorf("output results: %w", err)
 			}
@@ -131,6 +135,7 @@ func NewTestCommand(ctx context.Context) *cobra.Command {
 	cmd.Flags().Bool("fail-on-warn", false, "Return a non-zero exit code if warnings or errors are found")
 	cmd.Flags().Bool("no-fail", false, "Return an exit code of zero even if a policy fails")
 	cmd.Flags().Bool("no-color", false, "Disable color when printing")
+	cmd.Flags().Bool("suppress-exceptions", false, "Do not include exceptions in output")
 	cmd.Flags().Bool("all-namespaces", false, "Test policies found in all namespaces")
 
 	cmd.Flags().BoolP("trace", "", false, "Enable more verbose trace output for Rego queries")

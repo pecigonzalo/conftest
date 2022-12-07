@@ -10,7 +10,7 @@ require (
 	github.com/deislabs/oras v0.11.1
 	github.com/ghodss/yaml v1.0.0
 	github.com/go-akka/configuration v0.0.0-20200606091224-a002c0330665
-	github.com/go-ini/ini v1.62.0
+	github.com/go-ini/ini v1.67.0
 	github.com/google/go-jsonnet v0.17.0
 	github.com/hashicorp/go-getter v1.5.3
 	github.com/hashicorp/hcl v1.0.0
@@ -18,10 +18,10 @@ require (
 	github.com/logrusorgru/aurora v2.0.3+incompatible
 	github.com/moby/buildkit v0.8.2
 	github.com/olekukonko/tablewriter v0.0.5
-	github.com/open-policy-agent/opa v0.27.1
-	github.com/opencontainers/image-spec v1.0.1
+	github.com/open-policy-agent/opa v0.47.1
+	github.com/opencontainers/image-spec v1.0.3-0.20211202183452-c5a74bcca799
 	github.com/shteou/go-ignore v0.3.0
-	github.com/spf13/cobra v1.1.3
+	github.com/spf13/cobra v1.6.1
 	github.com/spf13/viper v1.7.1
 	github.com/tmccombs/hcl2json v0.3.1
 	olympos.io/encoding/edn v0.0.0-20201019073823-d3554ca0b0a3

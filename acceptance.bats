@@ -47,6 +47,13 @@
   [[ "$output" =~ "Containers must not run as root" ]]
 }
 
+@test "Fail due to picking up settings from config-file flag" {
+  DIR="examples/configfile"
+  run ./conftest -c $DIR/conftest.toml test -p $DIR/test $DIR/deployment.yaml
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "Containers must not run as root" ]]
+}
+
 @test "Has version flag" {
   run ./conftest --version
   [ "$status" -eq 0 ]
@@ -77,15 +84,127 @@
   [ "${lines[1]}" = "1 test, 0 passed, 0 warnings, 1 failure, 0 exceptions" ]
 }
 
+@test "Test command matches a single namespace literally" {
+  run ./conftest test -p examples/docker/policy examples/docker/Dockerfile --namespace 'main'
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "unallowed image found" ]]
+  [[ ! "$output" =~ "unallowed commands found" ]]
+}
+
+@test "Test command matches every namespace with a wildcard" {
+  run ./conftest test -p examples/docker/policy examples/docker/Dockerfile --namespace '*'
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "unallowed image found" ]]
+  [[ "$output" =~ "unallowed commands found" ]]
+}
+
+@test "Test command matches namespaces with a wildcard prefix" {
+  run ./conftest test -p examples/docker/policy examples/docker/Dockerfile --namespace 'c*'
+  [ "$status" -eq 1 ]
+  [[ ! "$output" =~ "unallowed image found" ]]
+  [[ "$output" =~ "unallowed commands found" ]]
+}
+
 @test "Verify command has trace flag" {
-    run ./conftest verify --policy ./examples/kubernetes/policy --trace
+  run ./conftest verify --policy ./examples/kubernetes/policy --trace
   [ "$status" -eq 0 ]
   [[ "$output" =~ "data.kubernetes.is_service" ]]
+}
+
+@test "Verify command matches a namespace literally" {
+  run ./conftest verify --policy ./examples/kubernetes/policy --namespace 'main'
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "4 tests, 4 passed" ]]
+}
+
+@test "Verify command matches namespaces with a wildcard" {
+  run ./conftest verify --policy ./examples/kubernetes/policy --namespace 'ma*'
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "4 tests, 4 passed" ]]
+}
+
+@test "Verify command filters out non-matching namespaces" {
+  run ./conftest verify --policy ./examples/kubernetes/policy --namespace 'doesnotexist'
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "0 tests, 0 passed" ]]
 }
 
 @test "Fail when verifying with no policies path" {
   run ./conftest verify -p internal/
   [ "$status" -eq 1 ]
+}
+
+@test "Verify command has report flag - no failures" {
+    run ./conftest verify --policy ./examples/report/policy --policy ./examples/report/success --report fails
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "data.main.test_no_missing_label: PASS" ]]
+    [[ "$output" =~ "PASS: 1/1" ]]
+}
+
+@test "Verify command has report flag - success with print output" {
+    run ./conftest verify --policy ./examples/report/policy_print --policy ./examples/report/success --report fails
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "data.main.test_no_missing_label: PASS" ]]
+    [[ "$output" =~ "sample" ]]
+    [[ "$output" =~ "PASS: 1/1" ]]
+}
+
+@test "Verify command does not support report flag with table output" {
+    run ./conftest verify --policy ./examples/report/policy -o table --report fails
+    [[ "$output" =~ "Error: report flag is not supported with table output" ]]
+}
+
+@test "Verify command does not support report flag with tap output" {
+    run ./conftest verify --policy ./examples/report/policy -o tap --report fails
+    [[ "$output" =~ "Error: report flag is not supported with tap output" ]]
+}
+
+@test "Verify command does not support report flag with junit output" {
+    run ./conftest verify --policy ./examples/report/policy -o junit --report fails
+    [[ "$output" =~ "Error: report flag is not supported with junit output" ]]
+}
+
+@test "Verify command does not support report flag with json output" {
+    run ./conftest verify --policy ./examples/report/policy -o json --report fails
+    [[ "$output" =~ "Error: report flag is not supported with json output" ]]
+}
+
+@test "Verify command does not support var-values flag with json output" {
+    run ./conftest verify --policy ./examples/report/policy -o json --var-values
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "Error: var-values flag is not supported with json output" ]]
+}
+
+@test "Verify command has report flag - report with trace flag" {
+    run ./conftest verify --policy ./examples/report/policy --policy ./examples/report/success --report fails --trace
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "PASS: 1/1" ]]
+}
+
+@test "Verify command has report flag - failure with report fails" {
+    run ./conftest verify --policy ./examples/report/policy --policy ./examples/report/fail --report fails
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "FAILURES" ]]
+    [[ "$output" =~ "data.main.test_missing_required_label_fail: FAIL" ]]
+    [[ "$output" =~ "FAIL: 1/1" ]]
+}
+
+@test "Verify command has report flag - failure with report notes" {
+    run ./conftest verify --policy ./examples/report/policy --policy ./examples/report/fail --report notes
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "FAILURES" ]]
+    [[ "$output" =~ "data.main.test_missing_required_label_fail: FAIL" ]]
+    [[ "$output" =~ "Note \"just testing notes flag\"" ]]
+    [[ "$output" =~ "FAIL: 1/1" ]]
+}
+
+@test "Verify command has report flag - failure with report full" {
+    run ./conftest verify --policy ./examples/report/policy --policy ./examples/report/fail --report full
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "FAILURES" ]]
+    [[ "$output" =~ "data.main.test_missing_required_label_fail: FAIL" ]]
+    [[ "$output" =~ "Note \"just testing notes flag\"" ]]
+    [[ "$output" =~ "FAIL: 1/1" ]]
 }
 
 @test "Has help flag" {
@@ -97,6 +216,12 @@
   run ./conftest test -p examples/hcl1/policy/base.rego examples/hcl1/gke-show.json
   [ "$status" -eq 1 ]
   [[ "$output" =~ "Terraform plan will change prohibited resources in the following namespaces: google_iam, google_container" ]]
+}
+
+@test "Supports print() output" {
+  run ./conftest test -p examples/report/policy_print/labels.rego examples/kubernetes/deployment.yaml --no-color
+  [ "$status" -eq 1 ]
+  [[ "${lines[0]}" == "PRNT   examples/report/policy_print/labels.rego:14: hello-kubernetes" ]]
 }
 
 @test "Can parse hcl1 files" {
@@ -153,7 +278,7 @@
 @test "Can parse cue files" {
   run ./conftest test -p examples/cue/policy examples/cue/deployment.cue
   [ "$status" -eq 1 ]
-  [[ "$output" =~ "The image port should be 8080 in deployment.cue. you got : 8081" ]]
+  [[ "$output" =~ "The image port should be 8080 in deployment.cue. you have : 8081" ]]
 }
 
 @test "Can parse ini files" {
@@ -165,7 +290,18 @@
 @test "Can parse hcl files" {
   run ./conftest test -p examples/hcl2/policy examples/hcl2/terraform.tf
   [ "$status" -eq 1 ]
-  [[ "$output" =~ "ALB \`my-alb-listener\` is using HTTP rather than HTTP" ]]
+  [[ "$output" =~ "ALB \`my-alb-listener\` is using HTTP rather than HTTPS" ]]
+}
+
+@test "Can parse properties files" {
+  run ./conftest test -p examples/properties/policy/ examples/properties/sample.properties
+  [ "$status" -eq 0 ]
+}
+
+@test "Can parse CODEOWNERS files" {
+  run ./conftest test -p examples/codeowners/policy examples/codeowners/CODEOWNERS
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "4 tests, 4 passed" ]]
 }
 
 @test "Can parse stdin with parser flag" {
@@ -180,6 +316,11 @@
   [ "$status" -eq 1 ]
 }
 
+@test "Can verify unit tests using parse_config() and parse_config_file builtins()" {
+  run ./conftest verify -p examples/hcl2/policy examples/hcl2
+  [ "$status" -eq 0 ]
+}
+
 @test "Can combine configs and reference by file" {
   run ./conftest test -p examples/hcl1/policy/gke_combine.rego examples/hcl1/gke.tf --combine --parser hcl1 --all-namespaces
   [ "$status" -eq 0 ]
@@ -189,6 +330,15 @@
   run ./conftest test -p examples/docker/policy examples/docker/Dockerfile
   [ "$status" -eq 1 ]
   [[ "$output" =~ "unallowed image found [\"openjdk:8-jdk-alpine\"]" ]]
+}
+
+@test "Can parse newly introduced keywords for docker" {
+  run bash -c "cat <<EOF | ./conftest parse --parser dockerfile -
+# syntax=docker/dockerfile:1.4
+FROM alpine
+COPY --link /foo /bar
+EOF"
+  [ "$status" -eq 0 ]
 }
 
 @test "Can disable color" {
@@ -213,6 +363,38 @@
   run ./conftest parse examples/docker/Dockerfile
   [ "$status" -eq 0 ]
   [[ "$output" =~ "\"Cmd\": \"from\"" ]]
+}
+
+@test "Can parse single file with 'conftest parse'" {
+  run bash -c "./conftest parse examples/kubernetes/deployment.yaml | jq '.kind'"
+  [ "$status" -eq 0 ]
+  [[ "$output" = "\"Deployment\"" ]]
+}
+
+@test "Can test a Jenkinsfile with the Groovy parser" {
+  run ./conftest test -p examples/jenkins/policy examples/jenkins/Jenkinsfile --output json
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "Pipeline downloads a script and pipes it directly to an interpreter" ]]
+  [[ "$output" =~ '"line": 6' ]]
+}
+
+@test "Can test a safe Jenkinsfile" {
+  run ./conftest test -p examples/jenkins/policy examples/jenkins/Jenkinsfile.safe
+  [ "$status" -eq 0 ]
+}
+
+@test "Can parse Groovy from stdin" {
+  run bash -c "./conftest parse --parser groovy - < examples/jenkins/Jenkinsfile.safe | jq -e '.kind == \"FileNode\"'"
+  [ "$status" -eq 0 ]
+}
+
+@test "Can parse multiple files with 'conftest parse'" {
+  run bash -c "./conftest parse examples/kubernetes/deployment.yaml examples/kubernetes/deployment+service.yaml | jq 'keys'"
+  [ "$status" -eq 0 ]
+  count="${#lines[@]}"
+  [ "$count" -eq 4 ]
+  [[ "$output" =~ "\"examples/kubernetes/deployment+service.yaml\"" ]]
+  [[ "$output" =~ "\"examples/kubernetes/deployment.yaml\"" ]]
 }
 
 @test "Can output tap format in test command" {
@@ -264,6 +446,18 @@
   [[ "$output" =~ "No images tagged latest" ]]
 }
 
+@test "Can validate a docker-compose file that does not conform to the policy" {
+  run ./conftest test -p examples/compose/policy examples/compose/docker-compose.yml --no-color
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "2 tests, 0 passed, 0 warnings, 2 failures, 0 exceptions" ]]
+}
+
+@test "Can validate a docker-compose file that conforms to the policy" {
+  run ./conftest test -p examples/compose/policy examples/compose/docker-compose-valid.yml --no-color
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "2 tests, 2 passed, 0 warnings, 0 failures, 0 exceptions" ]]
+}
+
 @test "The number of tests run is accurate" {
   run ./conftest test -p examples/kubernetes/policy examples/kubernetes/service.yaml --no-color
   [ "$status" -eq 0 ]
@@ -276,16 +470,131 @@
   [ "${lines[2]}" = "2 tests, 0 passed, 0 warnings, 1 failure, 1 exception" ]
 }
 
+@test "Exceptions output" {
+  run ./conftest test -p examples/exceptions/policy examples/exceptions/deployments.yaml --no-color
+  [ "$status" -eq 1 ]
+  [[ "${lines[1]}" =~ "EXCP - examples/exceptions/deployments.yaml - main - data.main.exception[_][_] == \"run_as_root\"" ]]
+}
+
+@test "Suppress exceptions output" {
+  run ./conftest test -p examples/exceptions/policy examples/exceptions/deployments.yaml --no-color --suppress-exceptions
+  [ "$status" -eq 1 ]
+  [ "${lines[1]}" = "2 tests, 0 passed, 0 warnings, 1 failure, 1 exception" ]
+}
+
 @test "Can combine yaml files" {
-  run ./conftest test -p examples/combine/policy examples/combine/team.yaml examples/combine/user1.yaml examples/combine/user2.yaml --combine 
+  run ./conftest test -p examples/combine/policy examples/combine/team.yaml examples/combine/user1.yaml examples/combine/user2.yaml --combine
 
   [ "$status" -eq 1 ]
   [[ "$output" =~ "2 tests, 1 passed, 0 warnings, 1 failure" ]]
 }
 
 @test "Combining multi-document yaml file has same result" {
-  run ./conftest test -p examples/combine/policy examples/combine/team.yaml examples/combine/users.yaml --combine 
+  run ./conftest test -p examples/combine/policy examples/combine/team.yaml examples/combine/users.yaml --combine
 
   [ "$status" -eq 1 ]
   [[ "$output" =~ "2 tests, 1 passed, 0 warnings, 1 failure" ]]
+}
+
+@test "Can parse SPDX file" {
+  run ./conftest parse --parser spdx examples/spdx/sbom.spdx
+
+  [ "$status" -eq 0 ]
+}
+
+@test "Can validate SPDX file" {
+  run ./conftest test -p examples/spdx/policy examples/spdx/sbom.spdx
+
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "1 test, 1 passed, 0 warnings, 0 failures, 0 exceptions" ]]
+}
+
+@test "Can test cyclonedx against policy" {
+  run ./conftest test --policy ./examples/cyclonedx/policy/ ./examples/cyclonedx/cyclonedx.json --parser cyclonedx
+  [ "$status" -eq 0 ]
+}
+
+@test "Can parse cyclonedx JSON file" {
+  run ./conftest parse --parser cyclonedx ./examples/cyclonedx/cyclonedx.json
+  [ "$status" -eq 0 ]
+}
+
+@test "Can parse cyclonedx XML file" {
+  run ./conftest parse --parser cyclonedx ./examples/cyclonedx/cyclonedx.xml
+  [ "$status" -eq 0 ]
+}
+
+@test "Can parse .env files" {
+  run ./conftest test -p examples/dotenv/policy/ examples/dotenv/sample.env
+  [ "$status" -eq 0 ]
+}
+
+@test "Should fail if strict is set and there are unused variables in the policy" {
+  run ./conftest test -p examples/strict-rules/policy/ examples/kubernetes/deployment.yaml --strict
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "rego_compile_error: assigned var b unused" ]]
+  [[ "$output" =~ "rego_compile_error: assigned var x unused" ]]
+  [[ "$output" =~ "rego_compile_error: assigned var c unused" ]]
+  [[ "$output" =~ "rego_compile_error: unused argument y" ]]
+}
+
+@test "Should fail when verifying if strict is set and there are unused variables in the policy" {
+  run ./conftest verify -p examples/strict-rules/policy/ examples/kubernetes/deployment.yaml --strict
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "rego_compile_error: assigned var b unused" ]]
+  [[ "$output" =~ "rego_compile_error: assigned var x unused" ]]
+  [[ "$output" =~ "rego_compile_error: assigned var c unused" ]]
+  [[ "$output" =~ "rego_compile_error: unused argument y" ]]
+}
+
+@test "Should fail if an opa function is not defined given capabilities file" {
+  run ./conftest test examples/kubernetes/deployment.yaml -p examples/kubernetes/policy/ -p examples/capabilities/malicious.rego --capabilities examples/capabilities/capabilities.json
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "undefined function opa.runtime" ]]
+  [[ "$output" =~ "undefined function http.send" ]]
+}
+
+@test "Can verify rego tests that uses parse_combined_config_files" {
+  run ./conftest verify --policy ./examples/kubernetes/combine
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "2 tests, 2 passed" ]]
+}
+
+@test "Should not show any output with quiet flag and all tests succeeds" {
+  run ./conftest test -p examples/kubernetes/policy/deny.rego examples/kubernetes/deployment.yaml --quiet
+  [ "$status" -eq 0 ]
+  [[ "$output" = "" ]]
+}
+
+@test "Should show output because of failure" {
+  run ./conftest test -p examples/kubernetes/policy/ examples/kubernetes/deployment.yaml  --all-namespaces --quiet
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "5 tests, 1 passed, 0 warnings, 4 failures, 0 exceptions" ]]
+}
+
+@test "Should fail evaluation if a builtin function returns error" {
+  run ./conftest test --show-builtin-errors -p examples/builtin-errors/invalid-dns.rego examples/kubernetes/deployment.yaml
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "built-in error" ]]
+}
+
+@test "TextProto policy returns expected results" {
+  run ./conftest test --proto-file-dirs=examples/textproto/protos -p examples/textproto/policy examples/textproto/
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "2 tests, 1 passed, 0 warnings, 1 failure, 0 exceptions" ]]
+}
+
+@test "TextProto policy fails when the proto messages could not be resolved" {
+  run ./conftest test -p examples/textproto/policy examples/textproto/
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "look up message type" ]]
+}
+
+@test "Can parse files from a symlinked directory" {
+  TMPDIR="$(mktemp -d -u)"
+  ln -s $(pwd)/examples/hcl2 ${TMPDIR}
+  run ./conftest test -p examples/hcl2/policy ${TMPDIR}
+  rm -rf ${TMPDIR}
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "10 tests, 3 passed, 0 warnings, 7 failures, 0 exceptions" ]]
 }

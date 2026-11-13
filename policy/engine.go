@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,47 +12,102 @@ import (
 	"github.com/open-policy-agent/conftest/output"
 	"github.com/open-policy-agent/conftest/parser"
 
-	"github.com/open-policy-agent/opa/ast"
-	"github.com/open-policy-agent/opa/loader"
-	"github.com/open-policy-agent/opa/rego"
-	"github.com/open-policy-agent/opa/storage"
-	"github.com/open-policy-agent/opa/topdown"
-	"github.com/open-policy-agent/opa/version"
+	"github.com/open-policy-agent/opa/v1/ast"
+	"github.com/open-policy-agent/opa/v1/bundle"
+	"github.com/open-policy-agent/opa/v1/loader"
+	"github.com/open-policy-agent/opa/v1/rego"
+	"github.com/open-policy-agent/opa/v1/storage"
+	"github.com/open-policy-agent/opa/v1/storage/inmem"
+	"github.com/open-policy-agent/opa/v1/topdown"
+	"github.com/open-policy-agent/opa/v1/topdown/cache"
+	"github.com/open-policy-agent/opa/v1/topdown/print"
+	"github.com/open-policy-agent/opa/v1/version"
 )
 
 // Engine represents the policy engine.
 type Engine struct {
-	modules  map[string]*ast.Module
-	compiler *ast.Compiler
-	store    storage.Store
-	policies map[string]string
-	docs     map[string]string
+	trace           bool
+	builtinErrors   bool
+	modules         map[string]*ast.Module
+	compiler        *ast.Compiler
+	store           storage.Store
+	policies        map[string]string
+	docs            map[string]string
+	interQueryCache cache.InterQueryCache
+}
+
+// CompilerOptions defines the options for the Rego compiler.
+type CompilerOptions struct {
+	Strict       bool
+	RegoVersion  string
+	Capabilities *ast.Capabilities
+}
+
+var (
+	warningRegex = regexp.MustCompile("^warn(_[a-zA-Z0-9]+)*$")
+	failureRegex = regexp.MustCompile("^(deny|violation)(_[a-zA-Z0-9]+)*$")
+)
+
+func newCompiler(opts CompilerOptions) *ast.Compiler {
+	return ast.NewCompiler().
+		WithEnablePrintStatements(true).
+		WithCapabilities(opts.Capabilities).
+		WithStrict(opts.Strict)
+}
+
+// LoadCapabilities loads Rego JSON capabilities given a path. If no path is supplied, the default
+// capabilities are returned.
+func LoadCapabilities(path string) (*ast.Capabilities, error) {
+	if path == "" {
+		return ast.CapabilitiesForThisVersion(), nil
+	}
+	return ast.LoadCapabilitiesFile(path)
 }
 
 // Load returns an Engine after loading all of the specified policies.
-func Load(ctx context.Context, policyPaths []string) (*Engine, error) {
-	policies, err := loader.AllRegos(policyPaths)
+func Load(policyPaths []string, opts CompilerOptions) (*Engine, error) {
+	var regoVer ast.RegoVersion
+	switch opts.RegoVersion {
+	case "v0", "V0":
+		regoVer = ast.RegoV0
+	case "v1", "V1":
+		regoVer = ast.RegoV1
+	default:
+		return nil, fmt.Errorf("invalid Rego version: %s", opts.RegoVersion)
+	}
+
+	l := loader.NewFileLoader().WithProcessAnnotation(true).WithRegoVersion(regoVer)
+	policies, err := l.Filtered(policyPaths, func(_ string, info os.FileInfo, _ int) bool {
+		return !info.IsDir() && !strings.HasSuffix(info.Name(), bundle.RegoExt)
+	})
+
 	if err != nil {
 		return nil, fmt.Errorf("load: %w", err)
 	} else if len(policies.Modules) == 0 {
 		return nil, fmt.Errorf("no policies found in %v", policyPaths)
 	}
 
-	compiler, err := policies.Compiler()
-	if err != nil {
-		return nil, fmt.Errorf("get compiler: %w", err)
+	modules := policies.ParsedModules()
+	compiler := newCompiler(opts)
+	compiler.Compile(modules)
+	if compiler.Failed() {
+		return nil, fmt.Errorf("get compiler: %w", compiler.Errors)
 	}
 
-	policyContents := make(map[string]string)
-	for path, module := range policies.ParsedModules() {
+	if err := problematicIf(modules); err != nil {
+		return nil, fmt.Errorf("rule is using 'if' keyword without 'contains' keyword: %w", err)
+	}
+
+	policyContents := make(map[string]string, len(modules))
+	for path, module := range policies.Modules {
 		path = filepath.Clean(path)
 		path = filepath.ToSlash(path)
 
-		policyContents[path] = module.String()
+		policyContents[path] = string(module.Raw)
 	}
 
 	engine := Engine{
-		modules:  policies.ParsedModules(),
+		modules:  modules,
 		compiler: compiler,
 		policies: policyContents,
 	}
@@ -62,25 +116,23 @@ func Load(ctx context.Context, policyPaths []string) (*Engine, error) {
 }
 
 // LoadWithData returns an Engine after loading all of the specified policies and data paths.
-func LoadWithData(ctx context.Context, policyPaths []string, dataPaths []string) (*Engine, error) {
-	engine, err := Load(ctx, policyPaths)
-	if err != nil {
-		return nil, fmt.Errorf("loading policies: %w", err)
+func LoadWithData(policyPaths []string, dataPaths []string, opts CompilerOptions) (*Engine, error) {
+	engine := &Engine{}
+	if len(policyPaths) > 0 {
+		var err error
+		engine, err = Load(policyPaths, opts)
+		if err != nil {
+			return nil, fmt.Errorf("loading policies: %w", err)
+		}
 	}
-
-	// FilteredPaths will recursively find all file paths that contain a valid document
-	// extension from the given list of data paths.
-	allDocumentPaths, err := loader.FilteredPaths(dataPaths, func(abspath string, info os.FileInfo, depth int) bool {
+	filter := func(_ string, info os.FileInfo, _ int) bool {
 		if info.IsDir() {
 			return false
 		}
 		return !contains([]string{".yaml", ".yml", ".json"}, filepath.Ext(info.Name()))
-	})
-	if err != nil {
-		return nil, fmt.Errorf("filter data paths: %w", err)
 	}
 
-	documents, err := loader.NewFileLoader().All(allDocumentPaths)
+	documents, err := loader.NewFileLoader().Filtered(dataPaths, filter)
 	if err != nil {
 		return nil, fmt.Errorf("load documents: %w", err)
 	}
@@ -89,9 +141,15 @@ func LoadWithData(ctx context.Context, policyPaths []string, dataPaths []string)
 		return nil, fmt.Errorf("get documents store: %w", err)
 	}
 
+	// FilteredPaths will recursively find all file paths that contain a valid document
+	// extension from the given list of data paths.
+	allDocumentPaths, err := loader.FilteredPaths(dataPaths, filter)
+	if err != nil {
+		return nil, fmt.Errorf("filter data paths: %w", err)
+	}
 	documentContents := make(map[string]string)
 	for _, documentPath := range allDocumentPaths {
-		contents, err := ioutil.ReadFile(documentPath)
+		contents, err := os.ReadFile(documentPath)
 		if err != nil {
 			return nil, fmt.Errorf("read file: %w", err)
 		}
@@ -107,9 +165,24 @@ func LoadWithData(ctx context.Context, policyPaths []string, dataPaths []string)
 	return engine, nil
 }
 
+func (e *Engine) EnableTracing() {
+	e.trace = true
+}
+
+func (e *Engine) ShowBuiltinErrors() {
+	e.builtinErrors = true
+}
+
+// EnableInterQueryCache enables OPA's inter-query builtin cache (used by http.send) for the
+// lifetime of the Engine. The cache must outlive a single query so that results are shared
+// across every rule and input evaluated by this Engine.
+func (e *Engine) EnableInterQueryCache() {
+	e.interQueryCache = cache.NewInterQueryCache(nil)
+}
+
 // Check executes all of the loaded policies against the input and returns the results.
-func (e *Engine) Check(ctx context.Context, configs map[string]interface{}, namespace string) ([]output.CheckResult, error) {
-	var checkResults []output.CheckResult
+func (e *Engine) Check(ctx context.Context, configs map[string]interface{}, namespace string) (output.CheckResults, error) {
+	var checkResults output.CheckResults
 	for path, config := range configs {
 
 		// It is possible for a configuration to have multiple configurations. An example of this
@@ -117,7 +190,7 @@ func (e *Engine) Check(ctx context.Context, configs map[string]interface{}, name
 		//
 		// If the current configuration contains multiple configurations, evaluate each policy
 		// independent from one another and aggregate the results under the same file name.
-		if subconfigs, exist := config.([]interface{}); exist {
+		if subconfigs, exist := config.([]any); exist {
 
 			checkResult := output.CheckResult{
 				FileName:  path,
@@ -151,7 +224,7 @@ func (e *Engine) Check(ctx context.Context, configs map[string]interface{}, name
 }
 
 // CheckCombined combines the input and evaluates the policies against the combined result.
-func (e *Engine) CheckCombined(ctx context.Context, configs map[string]interface{}, namespace string) (output.CheckResult, error) {
+func (e *Engine) CheckCombined(ctx context.Context, configs map[string]any, namespace string) (output.CheckResult, error) {
 	combinedConfigs := parser.CombineConfigurations(configs)
 
 	result, err := e.check(ctx, "Combined", combinedConfigs["Combined"], namespace)
@@ -226,7 +299,17 @@ func (e *Engine) Runtime() *ast.Term {
 	return ast.NewTerm(obj)
 }
 
-func (e *Engine) check(ctx context.Context, path string, config interface{}, namespace string) (output.CheckResult, error) {
+func (e *Engine) check(ctx context.Context, path string, config any, namespace string) (output.CheckResult, error) {
+	if err := e.addFileInfo(ctx, path); err != nil {
+		return output.CheckResult{}, fmt.Errorf("add file info: %w", err)
+	}
+
+	// Convert the input once so OPA doesn't re-parse it on every query call.
+	inputValue, err := ast.InterfaceToValue(config)
+	if err != nil {
+		return output.CheckResult{}, fmt.Errorf("convert input: %w", err)
+	}
+
 	var rules []string
 	var ruleCount int
 	for _, module := range e.Modules() {
@@ -269,7 +352,7 @@ func (e *Engine) check(ctx context.Context, path string, config interface{}, nam
 		// is queried, so the severity prefix must be removed.
 		exceptionQuery := fmt.Sprintf("data.%s.exception[_][_] == %q", namespace, removeRulePrefix(rule))
 
-		exceptionQueryResult, err := e.query(ctx, config, exceptionQuery, namespace)
+		exceptionQueryResult, err := e.query(ctx, inputValue, exceptionQuery)
 		if err != nil {
 			return output.CheckResult{}, fmt.Errorf("query exception: %w", err)
 		}
@@ -287,7 +370,7 @@ func (e *Engine) check(ctx context.Context, path string, config interface{}, nam
 		}
 
 		ruleQuery := fmt.Sprintf("data.%s.%s", namespace, rule)
-		ruleQueryResult, err := e.query(ctx, config, ruleQuery, namespace)
+		ruleQueryResult, err := e.query(ctx, inputValue, ruleQuery)
 		if err != nil {
 			return output.CheckResult{}, fmt.Errorf("query rule: %w", err)
 		}
@@ -317,9 +400,7 @@ func (e *Engine) check(ctx context.Context, path string, config interface{}, nam
 		checkResult.Failures = append(checkResult.Failures, failures...)
 		checkResult.Warnings = append(checkResult.Warnings, warnings...)
 		checkResult.Exceptions = append(checkResult.Exceptions, exceptions...)
-
-		checkResult.Queries = append(checkResult.Queries, exceptionQueryResult)
-		checkResult.Queries = append(checkResult.Queries, ruleQueryResult)
+		checkResult.Queries = append(checkResult.Queries, exceptionQueryResult, ruleQueryResult)
 	}
 
 	// Only a single success result is returned when a given rule succeeds, even if there are multiple occurrences
@@ -336,30 +417,76 @@ func (e *Engine) check(ctx context.Context, path string, config interface{}, nam
 	return checkResult, nil
 }
 
+// addFileInfo adds the file name and directory to data.conftest.file so that it is accessible to
+// the policies to be used during evaluation.
+func (e *Engine) addFileInfo(ctx context.Context, path string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("get absolute path: %w", err)
+	}
+	if e.store == nil {
+		e.store = inmem.New()
+	}
+	tx, err := e.store.NewTransaction(ctx, storage.WriteParams)
+	if err != nil {
+		return fmt.Errorf("begin store tx: %w", err)
+	}
+	if err := storage.MakeDir(ctx, e.store, tx, storage.Path{"conftest"}); err != nil {
+		return fmt.Errorf("create dir in store: %w", err)
+	}
+	if err := e.store.Write(
+		ctx, tx, storage.AddOp, storage.Path{"conftest", "file"},
+		map[string]string{
+			"name": filepath.Base(abs),
+			"dir":  filepath.Dir(abs),
+		},
+	); err != nil {
+		return fmt.Errorf("write file info to storage: %w", err)
+	}
+	if err := e.store.Commit(ctx, tx); err != nil {
+		return fmt.Errorf("commit file info to storage: %w", err)
+	}
+
+	return nil
+}
+
 // query is a low-level method that returns the result of executing a single query against the input.
 //
 // Example queries could include:
 // data.main.deny to query the deny rule in the main namespace
 // data.main.warn to query the warn rule in the main namespace
-func (e *Engine) query(ctx context.Context, input interface{}, query string, namespace string) (output.QueryResult, error) {
-	stdout := topdown.NewBufferTracer()
+func (e *Engine) query(ctx context.Context, input ast.Value, query string) (output.QueryResult, error) {
+	ph := printHook{s: &[]string{}}
+	builtInErrors := &[]topdown.Error{}
 	options := []func(r *rego.Rego){
-		rego.Input(input),
+		rego.ParsedInput(input),
 		rego.Query(query),
 		rego.Compiler(e.Compiler()),
 		rego.Store(e.Store()),
 		rego.Runtime(e.Runtime()),
-		rego.QueryTracer(stdout),
+		rego.Trace(e.trace),
+		rego.PrintHook(ph),
+		rego.BuiltinErrorList(builtInErrors),
 	}
-	resultSet, err := rego.New(options...).Eval(ctx)
+	if e.interQueryCache != nil {
+		options = append(options, rego.InterQueryBuiltinCache(e.interQueryCache))
+	}
+
+	regoInstance := rego.New(options...)
+	resultSet, err := regoInstance.Eval(ctx)
 	if err != nil {
 		return output.QueryResult{}, fmt.Errorf("evaluating policy: %w", err)
+	}
+
+	if e.builtinErrors && len(*builtInErrors) > 0 {
+		return output.QueryResult{}, fmt.Errorf("built-in error: %+v", (*builtInErrors))
 	}
 
 	// After the evaluation of the policy, the results of the trace (stdout) will be populated
 	// for the query. Once populated, format the trace results into a human readable format.
 	buf := new(bytes.Buffer)
-	topdown.PrettyTrace(buf, *stdout)
+	rego.PrintTrace(buf, regoInstance)
+
 	var traces []string
 	for _, line := range strings.Split(buf.String(), "\n") {
 		if len(line) > 0 {
@@ -372,13 +499,13 @@ func (e *Engine) query(ctx context.Context, input interface{}, query string, nam
 		for _, expression := range result.Expressions {
 
 			// Rego rules that are intended for evaluation should return a slice of values.
-			// For example, deny[msg] or violation[{"msg": msg}].
+			// For example, `deny contains msg if` or `violation contains {"msg": msg} if`.
 			//
 			// When an expression does not have a slice of values, the expression did not
 			// evaluate to true, and no message was returned.
-			var expressionValues []interface{}
-			if _, ok := expression.Value.([]interface{}); ok {
-				expressionValues = expression.Value.([]interface{})
+			var expressionValues []any
+			if _, ok := expression.Value.([]any); ok {
+				expressionValues = expression.Value.([]any)
 			}
 			if len(expressionValues) == 0 {
 				results = append(results, output.Result{})
@@ -388,19 +515,25 @@ func (e *Engine) query(ctx context.Context, input interface{}, query string, nam
 			for _, v := range expressionValues {
 				switch val := v.(type) {
 
-				// Policies that only return a single string (e.g. deny[msg])
+				// Policies that only return a single string (e.g. `deny contains msg if`)
 				case string:
 					result := output.Result{
 						Message: val,
+						Metadata: map[string]any{
+							"query": query,
+						},
 					}
 					results = append(results, result)
 
-				// Policies that return metadata (e.g. deny[{"msg": msg}])
-				case map[string]interface{}:
+				// Policies that return metadata (e.g. `deny contains {"msg": msg} if`)
+				case map[string]any:
 					result, err := output.NewResult(val)
 					if err != nil {
 						return output.QueryResult{}, fmt.Errorf("new result: %w", err)
 					}
+
+					// Safe to set as Metadata map is initialized by NewResult
+					result.Metadata["query"] = query
 
 					results = append(results, result)
 				}
@@ -412,19 +545,37 @@ func (e *Engine) query(ctx context.Context, input interface{}, query string, nam
 		Query:   query,
 		Results: results,
 		Traces:  traces,
+		Outputs: *ph.s,
 	}
 
 	return queryResult, nil
 }
 
 func isWarning(rule string) bool {
-	warningRegex := regexp.MustCompile("^warn(_[a-zA-Z0-9]+)*$")
 	return warningRegex.MatchString(rule)
 }
 
 func isFailure(rule string) bool {
-	failureRegex := regexp.MustCompile("^(deny|violation)(_[a-zA-Z0-9]+)*$")
 	return failureRegex.MatchString(rule)
+}
+
+func problematicIf(modules map[string]*ast.Module) error {
+	// https://github.com/open-policy-agent/opa/issues/6509
+	for _, module := range modules {
+		for _, rule := range module.Rules {
+			if rule.Head == nil || rule.Head.Name != "" || rule.Head.Value == nil || len(rule.Head.Reference) == 0 {
+				continue
+			}
+			refName := rule.Head.Reference[0].Value.String()
+			if isFailure(refName) || isWarning(refName) {
+				// Value being "true" here indicates usage of "if" without "contains".
+				if rule.Head.Value.String() == "true" {
+					return fmt.Errorf("rule in %s at line %d", module.Package.Loc().File, rule.Head.Location.Row)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func contains(collection []string, item string) bool {
@@ -438,9 +589,21 @@ func contains(collection []string, item string) bool {
 }
 
 func removeRulePrefix(rule string) string {
+	if rule == "violation" || rule == "deny" || rule == "warn" {
+		return ""
+	}
 	rule = strings.TrimPrefix(rule, "violation_")
 	rule = strings.TrimPrefix(rule, "deny_")
 	rule = strings.TrimPrefix(rule, "warn_")
 
 	return rule
+}
+
+type printHook struct {
+	s *[]string
+}
+
+func (ph printHook) Print(pctx print.Context, msg string) error {
+	*ph.s = append(*ph.s, fmt.Sprintf("%v: %s\n", pctx.Location, msg))
+	return nil
 }

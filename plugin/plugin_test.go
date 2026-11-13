@@ -1,27 +1,79 @@
 package plugin
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
+	"sigs.k8s.io/yaml"
 )
 
 func TestParseCommand(t *testing.T) {
-	executable, arguments, err := parseCommand("plugin.sh arg1", []string{"arg2"})
-	if err != nil {
-		t.Fatal("parse command:", err)
+	t.Parallel()
+
+	testCases := []struct {
+		desc     string
+		cmd      string
+		args     []string
+		wantExec string
+		wantArgs []string
+	}{
+		{
+			desc:     "base no args",
+			cmd:      "plugin.sh",
+			wantExec: "plugin.sh",
+		},
+		{
+			desc:     "base with args",
+			cmd:      "plugin.sh arg1",
+			args:     []string{"arg2"},
+			wantExec: "plugin.sh",
+			wantArgs: []string{"arg1", "arg2"},
+		},
+		{
+			desc:     "absolute path with space in command",
+			cmd:      absPathPrefix(t) + filepath.Clean("Users/user/Library/Application Support/.conftest/plugins/kubectl/kubectl.sh some-resource"),
+			wantExec: absPathPrefix(t) + filepath.Clean("Users/user/Library/Application Support/.conftest/plugins/kubectl/kubectl.sh"),
+			wantArgs: []string{"some-resource"},
+		},
+		{
+			desc:     "relative path with space in command",
+			cmd:      relPathPrefix(t) + filepath.Clean("Users/user/Library/Application Support/.conftest/plugins/kubectl/kubectl.sh some-resource"),
+			wantExec: relPathPrefix(t) + filepath.Clean("Users/user/Library/Application Support/.conftest/plugins/kubectl/kubectl.sh"),
+			wantArgs: []string{"some-resource"},
+		},
+		{
+			desc:     "touch with full path",
+			cmd:      "touch /var/folders/z1/nbh65m250ksd02b31gwzj4p40000gn/T/nix-shell.xmlkqd/TestPluginExecbasic_command545725104/001/output.txt",
+			wantExec: "touch",
+			wantArgs: []string{"/var/folders/z1/nbh65m250ksd02b31gwzj4p40000gn/T/nix-shell.xmlkqd/TestPluginExecbasic_command545725104/001/output.txt"},
+		},
 	}
 
-	if executable != "plugin.sh" {
-		t.Errorf("Unexpected executable. expected %v, actual %v", "plugin.sh", executable)
-	}
-	if arguments[0] != "arg1" {
-		t.Errorf("Unexpected argument. expected %v, actual %v", "arg1", arguments[0])
-	}
-	if arguments[1] != "arg2" {
-		t.Errorf("Unexpected argument. expected %v, actual %v", "arg2", arguments[1])
+	for _, tc := range testCases {
+		t.Run(tc.desc, func(t *testing.T) {
+			t.Parallel()
+
+			exec, args, err := parseCommand(tc.cmd, tc.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if exec != tc.wantExec {
+				t.Errorf("executable = %s, want %s", exec, tc.wantExec)
+			}
+			if diff := cmp.Diff(args, tc.wantArgs); diff != "" {
+				t.Errorf("unexpected argument list. diff:\n%s", diff)
+			}
+		})
 	}
 }
 
 func TestParseCommand_WindowsShell(t *testing.T) {
+	t.Parallel()
+
 	executable, arguments, err := parseWindowsCommand("plugin.sh arg1", []string{"arg2"})
 	if err != nil {
 		t.Fatal("parse command:", err)
@@ -39,4 +91,282 @@ func TestParseCommand_WindowsShell(t *testing.T) {
 	if arguments[2] != "arg2" {
 		t.Errorf("Unexpected argument. expected %v, actual %v", "arg2", arguments[2])
 	}
+}
+
+func TestLoad(t *testing.T) {
+	t.Run("valid plugin", func(t *testing.T) {
+		dir := createTestPlugin(t, &Plugin{
+			Name:    "test-plugin",
+			Version: "1.0",
+			Command: "echo hello",
+		})
+
+		plugin, err := Load("test-plugin")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if plugin.Directory() != dir {
+			t.Errorf("expected directory %s, got %s", dir, plugin.Directory())
+		}
+	})
+
+	t.Run("non-existent plugin", func(t *testing.T) {
+		_, err := Load("non-existent")
+		if err == nil {
+			t.Fatal("expected error but got none")
+		}
+	})
+}
+
+func TestFindAll(t *testing.T) {
+	// Set up isolated cache directory
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", tmpDir)
+
+	// Create plugins directly in the expected cache location
+	pluginDir := filepath.Join(tmpDir, ".conftest", "plugins")
+	if err := os.MkdirAll(pluginDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create 3 test plugins
+	plugins := []*Plugin{
+		{Name: "plugin1", Command: "echo 1"},
+		{Name: "plugin2", Command: "echo 2"},
+		{Name: "plugin3", Command: "echo 3"},
+	}
+
+	for _, p := range plugins {
+		dir := filepath.Join(pluginDir, p.Name)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		data, err := yaml.Marshal(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := os.WriteFile(filepath.Join(dir, "plugin.yaml"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Create invalid plugin directory
+	invalidDir := filepath.Join(pluginDir, "invalid-plugin")
+	if err := os.MkdirAll(invalidDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	found, err := FindAll()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(found) != 3 {
+		t.Errorf("expected 3 plugins, found %d", len(found))
+	}
+
+	// Verify invalid plugin was removed
+	if _, err := os.Stat(invalidDir); !os.IsNotExist(err) {
+		t.Error("expected invalid plugin directory to be removed")
+	}
+}
+
+func TestPluginExec(t *testing.T) {
+	t.Run("basic command", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		testFile := filepath.Join(tmpDir, "output.txt")
+
+		p := &Plugin{
+			Name:    "exec-test",
+			Command: fmt.Sprintf("touch %s", testFile),
+		}
+		createTestPlugin(t, p)
+
+		plugin, err := Load("exec-test")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := plugin.Exec(t.Context(), nil); err != nil {
+			t.Fatal(err)
+		}
+
+		content, err := os.ReadFile(testFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if string(content) != "" {
+			t.Errorf("unexpected output file content: %q", string(content))
+		}
+	})
+
+	t.Run("with arguments", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		testFile := filepath.Join(tmpDir, "args.txt")
+
+		p := &Plugin{
+			Name:    "args-test",
+			Command: "echo",
+		}
+		createTestPlugin(t, p)
+
+		plugin, err := Load("args-test")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		originalStdout := os.Stdout
+		defer func() { os.Stdout = originalStdout }()
+
+		f, err := os.Create(testFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.Stdout = f
+		defer f.Close()
+
+		if err := plugin.Exec(t.Context(), []string{"arg1", "arg2"}); err != nil {
+			t.Fatal(err)
+		}
+
+		content, err := os.ReadFile(testFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected := "arg1 arg2\n"
+		if string(content) != expected {
+			t.Errorf("expected %q, got %q", expected, string(content))
+		}
+	})
+
+	t.Run("command error handling", func(t *testing.T) {
+		p := &Plugin{
+			Name:    "error-test",
+			Command: "exit 42",
+		}
+		createTestPlugin(t, p)
+
+		plugin, err := Load("error-test")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = plugin.Exec(t.Context(), nil)
+		if err == nil {
+			t.Fatal("expected error but got none")
+		}
+	})
+
+	t.Run("exit code propagation", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("shell scripts require sh on Windows")
+		}
+
+		// Exec must surface the plugin's actual exit code via ExitCodeError for
+		// every non-zero value, including 1 and 2 which were previously swallowed
+		// as success (#741).
+		for _, wantCode := range []int{1, 2, 3, 42} {
+			t.Run(fmt.Sprintf("exit code %d", wantCode), func(t *testing.T) {
+				tmpDir := t.TempDir()
+				scriptPath := filepath.Join(tmpDir, "exit.sh")
+				if err := os.WriteFile(scriptPath, []byte(fmt.Sprintf("#!/bin/sh\nexit %d\n", wantCode)), 0o755); err != nil {
+					t.Fatal(err)
+				}
+
+				p := &Plugin{
+					Name:    fmt.Sprintf("exit-code-%d-test", wantCode),
+					Command: scriptPath,
+				}
+				createTestPlugin(t, p)
+
+				plugin, err := Load(p.Name)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				err = plugin.Exec(t.Context(), nil)
+				if err == nil {
+					t.Fatalf("exit code %d: expected ExitCodeError, got nil", wantCode)
+				}
+
+				exitErr, ok := AsExitCodeError(err)
+				if !ok {
+					t.Fatalf("exit code %d: expected *ExitCodeError, got %T: %v", wantCode, err, err)
+				}
+
+				if exitErr.Code != wantCode {
+					t.Errorf("exit code %d: ExitCodeError.Code = %d, want %d", wantCode, exitErr.Code, wantCode)
+				}
+			})
+		}
+	})
+
+	t.Run("successful command returns no error", func(t *testing.T) {
+		p := &Plugin{
+			Name:    "success-test",
+			Command: "true",
+		}
+		createTestPlugin(t, p)
+
+		plugin, err := Load("success-test")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := plugin.Exec(t.Context(), nil); err != nil {
+			t.Fatalf("expected no error on success, got: %v", err)
+		}
+	})
+}
+
+// Helper to create a test plugin in the cache directory
+func createTestPlugin(t *testing.T, plugin *Plugin) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+
+	// Create a specific plugins directory structure
+	pluginsDir := filepath.Join(tmpDir, ".conftest", "plugins")
+	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set both XDG variables to use our temp directory
+	t.Setenv("XDG_CACHE_HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", tmpDir)
+
+	// Create the plugin directory
+	resolveDir := filepath.Join(CacheDirectory(), plugin.Name)
+	if err := os.MkdirAll(resolveDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := yaml.Marshal(plugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	configPath := filepath.Join(resolveDir, "plugin.yaml")
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	return resolveDir
+}
+
+func absPathPrefix(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return "C:\\"
+	}
+	return "/"
+}
+
+func relPathPrefix(t *testing.T) string {
+	t.Helper()
+	return ".." + string(os.PathSeparator)
 }

@@ -2,11 +2,13 @@ package docker
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/moby/buildkit/frontend/dockerfile/instructions"
 	"github.com/moby/buildkit/frontend/dockerfile/parser"
+
+	"github.com/open-policy-agent/conftest/parser/internal/convert"
 )
 
 // Parser is a Dockerfile parser.
@@ -35,7 +37,7 @@ type Command struct {
 }
 
 // Unmarshal unmarshals Dockerfiles
-func (dp *Parser) Unmarshal(p []byte, v interface{}) error {
+func (dp *Parser) Unmarshal(p []byte, v any) error {
 	r := bytes.NewReader(p)
 	res, err := parser.Parse(r)
 	if err != nil {
@@ -70,7 +72,11 @@ func (dp *Parser) Unmarshal(p []byte, v interface{}) error {
 		}
 
 		cmd := Command{
-			Cmd:   child.Value,
+
+			// For consistency within policies, always lowercase the command.
+			// As an example, a policy that checks for the below could fail:
+			// input[i].Cmd == "FROM"
+			Cmd:   strings.ToLower(child.Value),
 			Flags: child.Flags,
 			Stage: currentStage(stages),
 		}
@@ -91,16 +97,7 @@ func (dp *Parser) Unmarshal(p []byte, v interface{}) error {
 	var dockerFile [][]Command
 	dockerFile = append(dockerFile, commands)
 
-	j, err := json.Marshal(dockerFile)
-	if err != nil {
-		return fmt.Errorf("marshal dockerfile to json: %w", err)
-	}
-
-	if err := json.Unmarshal(j, v); err != nil {
-		return fmt.Errorf("unmarshal dockerfile json: %w", err)
-	}
-
-	return nil
+	return convert.Remarshal("dockerfile", dockerFile, v)
 }
 
 // Return the index of the stages. If no stages are present,

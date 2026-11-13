@@ -10,7 +10,7 @@ import (
 // them into URLs that the OCI getter can understand.
 type OCIDetector struct{}
 
-// Detect will detect if the source is an OCI registry
+// Detect will detect if the source is an OCI registry.
 func (d *OCIDetector) Detect(src, _ string) (string, bool, error) {
 	if len(src) == 0 {
 		return "", false, nil
@@ -30,10 +30,12 @@ func (d *OCIDetector) Detect(src, _ string) (string, bool, error) {
 
 func containsOCIRegistry(src string) bool {
 	matchRegistries := []*regexp.Regexp{
-		regexp.MustCompile("azurecr.io"),
-		regexp.MustCompile("gcr.io"),
-		regexp.MustCompile("registry.gitlab.com"),
-		regexp.MustCompile("[0-9]{12}.dkr.ecr.[a-z0-9-]*.amazonaws.com"),
+		regexp.MustCompile(`azurecr\.io`),
+		regexp.MustCompile(`gcr\.io`),
+		regexp.MustCompile(`registry\.gitlab\.com`),
+		regexp.MustCompile(`pkg\.dev`),
+		regexp.MustCompile(`[0-9]{12}\.dkr\.ecr\.[a-z0-9-]*\.amazonaws\.com`),
+		regexp.MustCompile(`^quay\.io`),
 	}
 
 	for _, matchRegistry := range matchRegistries {
@@ -46,7 +48,9 @@ func containsOCIRegistry(src string) bool {
 }
 
 func containsLocalRegistry(src string) bool {
-	return strings.Contains(src, "127.0.0.1:5000") || strings.Contains(src, "localhost:5000")
+	matched, err := regexp.MatchString(`(?:::1|127\.0\.0\.1|(?i:localhost)):\d{1,5}`, src)
+
+	return err == nil && matched
 }
 
 func detectHTTP(src string) (string, error) {

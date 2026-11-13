@@ -2,8 +2,8 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,13 +11,34 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/ghodss/yaml"
+	"sigs.k8s.io/yaml"
 )
 
 const (
 	cacheDir       = ".conftest"
 	cacheDirectory = xdgPath(cacheDir)
 )
+
+// ExitCodeError is returned by Exec when a plugin exits with a non-zero status
+// code. It carries the plugin's actual exit code so callers can propagate it to
+// conftest's own process exit code rather than collapsing every failure to 1.
+type ExitCodeError struct {
+	Code int
+}
+
+func (e *ExitCodeError) Error() string {
+	return fmt.Sprintf("plugin exited with status %d", e.Code)
+}
+
+// AsExitCodeError unwraps err looking for an ExitCodeError. If one is found it
+// is returned along with true, otherwise it returns nil and false.
+func AsExitCodeError(err error) (*ExitCodeError, bool) {
+	var e *ExitCodeError
+	if errors.As(err, &e) {
+		return e, true
+	}
+	return nil, false
+}
 
 // Plugin represents a plugin.
 type Plugin struct {
@@ -52,7 +73,7 @@ func FindAll() ([]*Plugin, error) {
 		return []*Plugin{}, nil
 	}
 
-	files, err := ioutil.ReadDir(CacheDirectory())
+	files, err := os.ReadDir(CacheDirectory())
 	if err != nil {
 		return nil, fmt.Errorf("read plugin cache: %w", err)
 	}
@@ -88,7 +109,7 @@ func (p *Plugin) Exec(ctx context.Context, args []string) error {
 	// Plugin configurations reference the CONFTEST_PLUGIN_DIR
 	// environment to be able to call the plugin.
 	os.Setenv("CONFTEST_PLUGIN_DIR", p.Directory())
-	expandedCommand := os.ExpandEnv(string(p.Command))
+	expandedCommand := os.ExpandEnv(p.Command)
 
 	var command string
 	var arguments []string
@@ -122,13 +143,11 @@ func (p *Plugin) Exec(ctx context.Context, args []string) error {
 			return fmt.Errorf("status: %w", err)
 		}
 
-		// Conftest can either return 1 or 2 for an error. If Conftest
-		// returns an error, let it handle its own error.
-		if status.ExitStatus() == 1 || status.ExitStatus() == 2 {
-			return nil
-		}
-
-		return fmt.Errorf("plugin exec: %w", err)
+		// Return the plugin's actual exit code so callers can propagate it to
+		// conftest's own exit code. Previously codes 1 and 2 were swallowed as
+		// success and other codes were collapsed to a generic error, which made
+		// it impossible to rely on a plugin's exit code from scripts or CI (#741).
+		return &ExitCodeError{Code: status.ExitStatus()}
 	}
 
 	return nil
@@ -143,8 +162,13 @@ func (p *Plugin) Directory() string {
 // CacheDirectory returns the full path to the
 // cache directory where all of the plugins are stored.
 func CacheDirectory() string {
-	dir, _ := cacheDirectory.Find("plugins")
-	return dir
+	// Use pre-existing cache directory if it exists, otherwise
+	// pick the preferred directory based on XDG environment vars.
+	dir, err := cacheDirectory.Find("plugins")
+	if err != nil {
+		return dir
+	}
+	return cacheDirectory.Preferred("plugins")
 }
 
 // FromDirectory returns a plugin from a specific directory.
@@ -155,7 +179,7 @@ func FromDirectory(directory string) (*Plugin, error) {
 	const configurationFileName = "plugin.yaml"
 
 	configPath := filepath.Join(directory, configurationFileName)
-	data, err := ioutil.ReadFile(configPath)
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
@@ -169,12 +193,22 @@ func FromDirectory(directory string) (*Plugin, error) {
 }
 
 func parseCommand(command string, extraArgs []string) (string, []string, error) {
-	args := strings.Split(command, " ")
-	if len(args) == 0 || args[0] == "" {
+	var executable string
+	var args []string
+
+	// If the command has a path, there is a chance it contains spaces which are
+	// not a part of the args. In this case, filepath.Base() will include the command
+	// and the rest of the args.
+	if commandHasPath(command) {
+		args = strings.Split(filepath.Base(command), " ")
+		executable = filepath.Join(filepath.Dir(command), args[0])
+	} else {
+		args = strings.Split(command, " ")
+		executable = args[0]
+	}
+	if executable == "" {
 		return "", nil, fmt.Errorf("prepare plugin command: no command found")
 	}
-
-	executable := args[0]
 
 	var configArguments []string
 	if len(args) > 1 {
@@ -186,6 +220,12 @@ func parseCommand(command string, extraArgs []string) (string, []string, error) 
 	}
 
 	return executable, configArguments, nil
+}
+
+func commandHasPath(command string) bool {
+	return filepath.IsAbs(command) ||
+		strings.HasPrefix(command, ".."+string(os.PathSeparator)) ||
+		strings.HasPrefix(command, "."+string(os.PathSeparator))
 }
 
 func parseWindowsCommand(command string, extraArgs []string) (string, []string, error) {

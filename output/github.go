@@ -1,0 +1,134 @@
+package output
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"strings"
+)
+
+type githubLevel string
+
+const (
+	githubInfo  githubLevel = "notice"
+	githubWarn  githubLevel = "warning"
+	githubError githubLevel = "error"
+)
+
+// GitHub represents an Outputter that outputs
+// results in GitHub workflow format.
+// https://docs.github.com/en/actions/reference/workflow-commands-for-github-actions
+type GitHub struct {
+	writer io.Writer
+
+	// hidePassed skips the per-file annotation group for input files that
+	// only have successful checks. The summary line still counts every test.
+	hidePassed bool
+}
+
+// NewGitHub creates a new GitHub with the given writer. When hidePassed is
+// true, input files whose checks all passed are omitted from the annotation
+// output to reduce noise.
+func NewGitHub(w io.Writer, hidePassed bool) *GitHub {
+	github := GitHub{
+		writer:     w,
+		hidePassed: hidePassed,
+	}
+
+	return &github
+}
+
+// Output outputs the results.
+func (g *GitHub) Output(checkResults CheckResults) error {
+	for _, result := range checkResults {
+		// When hidePassed is set, skip files that only have successful checks.
+		// Their tests still count toward the summary line.
+		if g.hidePassed && len(result.Failures) == 0 && len(result.Warnings) == 0 && len(result.Exceptions) == 0 && len(result.Skipped) == 0 {
+			continue
+		}
+
+		numPolicies := result.Totals().Tests()
+
+		fileLoc := &Location{File: result.FileName, Line: json.Number("1")}
+
+		g.writeLn("::group::Testing %q against %d policies in namespace %q", result.FileName, numPolicies, result.Namespace)
+		for _, failure := range result.Failures {
+			g.writeLocs(githubError, fileLoc, failure.Location, failure.Message)
+		}
+		for _, warning := range result.Warnings {
+			g.writeLocs(githubWarn, fileLoc, warning.Location, warning.Message)
+		}
+		for _, exception := range result.Exceptions {
+			g.writeLocs(githubInfo, fileLoc, exception.Location, exception.Message)
+		}
+		for _, skipped := range result.Skipped {
+			g.writeLocs(githubInfo, fileLoc, skipped.Location, "Test was skipped: %s", skipped.Message)
+		}
+		g.writeLoc(githubInfo, fileLoc, "Number of successful checks: %d", result.Successes)
+		g.writeLn("::endgroup::")
+	}
+
+	g.writeLn("%s", checkResults.Totals())
+
+	return nil
+}
+
+func (g *GitHub) writeLn(msg string, args ...any) {
+	fmt.Fprintf(g.writer, msg+"\n", args...)
+}
+
+// escapeProperty escapes a workflow command property value. ':' and ',' delimit
+// the property block, so a file name containing either would end it early.
+// https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands
+func escapeProperty(v string) string {
+	return strings.NewReplacer(
+		"%", "%25",
+		"\r", "%0D",
+		"\n", "%0A",
+		":", "%3A",
+		",", "%2C",
+	).Replace(v)
+}
+
+func (g *GitHub) writeLoc(level githubLevel, loc *Location, msg string, args ...any) {
+	// Only a message that arrives with arguments is a template. A policy
+	// message is data, so formatting it unconditionally read the '%' in
+	// "above 50% of capacity" as an octal verb and printed
+	// "above 50%!o(MISSING)f capacity".
+	if len(args) > 0 {
+		msg = fmt.Sprintf(msg, args...)
+	}
+
+	// Format the message first: the escaped file name contains '%' sequences
+	// that must not be read as verbs by the final Fprintf.
+	g.writeLn("%s", fmt.Sprintf("::%s file=%s,line=%s::%s", level, escapeProperty(loc.File), loc.Line, msg))
+}
+
+func (g *GitHub) writeLocs(level githubLevel, fileLoc, ogLoc *Location, msg string, args ...any) {
+	// Resolve the message here so that the writes below never format an
+	// already formatted policy message a second time.
+	if len(args) > 0 {
+		msg = fmt.Sprintf(msg, args...)
+	}
+
+	// If no location was specified by the policy, default to the file location.
+	if ogLoc == nil {
+		g.writeLoc(level, fileLoc, msg)
+		return
+	}
+
+	// If in the same file, prefer the location produced by the Rego policy.
+	if ogLoc.File == fileLoc.File {
+		g.writeLoc(level, ogLoc, msg)
+		return
+	}
+
+	// If different files, produce messages for both locations.
+	// Always produce a relattive path as some inputs may be a long absolute path.
+	og := &Location{
+		File: relPath(ogLoc.File),
+		Line: ogLoc.Line,
+	}
+	g.writeLoc(level, og, msg)
+	g.writeLoc(level, fileLoc, fmt.Sprintf("(ORIGINATING FROM %s) %s", og, msg))
+}

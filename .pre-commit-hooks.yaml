@@ -1,0 +1,50 @@
+- id: conftest-test
+  name: Conftest Test Policy Check
+  description: Validate configuration files against Open Policy Agent policies using Conftest
+  entry: conftest test
+  language: golang
+  pass_filenames: true
+  require_serial: true
+  minimum_pre_commit_version: "2.9.0"
+  stages: [pre-commit, pre-merge-commit, pre-push, manual]
+
+- id: conftest-verify
+  name: Conftest Verify Policy Tests
+  description: Run Rego unit tests for Conftest policies
+  entry: conftest verify
+  language: golang
+  pass_filenames: false
+  require_serial: true
+  minimum_pre_commit_version: "2.9.0"
+  stages: [pre-commit, pre-merge-commit, pre-push, manual]
+
+- id: conftest-pull
+  name: Pull Conftest Policy Rego files
+  description: Download Conftest Policies
+  entry: conftest pull
+  language: golang
+  pass_filenames: false
+  require_serial: true
+  minimum_pre_commit_version: "2.9.0"
+  stages: [pre-commit, pre-merge-commit, pre-push, manual]
+
+- id: conftest-fmt
+  name: Conftest Format Rego files
+  description: Format Rego unit tests for Conftest policies
+  entry: conftest fmt
+  language: golang
+  pass_filenames: true
+  require_serial: false
+  minimum_pre_commit_version: "2.9.0"
+  stages: [pre-commit, pre-merge-commit, pre-push, manual]
+
+- id: conftest-doc
+  name: Conftest Doc Policy Documentation
+  description: Generate policy documentation, fails if docs are out of date. Defaults to policy directory. Supports -o for output directory and --template for custom template.
+  entry: conftest doc
+  args: [policy]
+  language: golang
+  pass_filenames: false
+  require_serial: true
+  minimum_pre_commit_version: "2.9.0"
+  stages: [pre-commit, pre-merge-commit, pre-push, manual]

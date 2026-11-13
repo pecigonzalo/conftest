@@ -3,22 +3,35 @@ package parser
 import (
 	"bufio"
 	"fmt"
-	"io/ioutil"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/spf13/viper"
+	"golang.org/x/exp/slices"
+
+	"github.com/open-policy-agent/conftest/parser/codeowners"
 	"github.com/open-policy-agent/conftest/parser/cue"
+	"github.com/open-policy-agent/conftest/parser/cyclonedx"
 	"github.com/open-policy-agent/conftest/parser/docker"
+	dotenv "github.com/open-policy-agent/conftest/parser/dotenv"
 	"github.com/open-policy-agent/conftest/parser/edn"
+	"github.com/open-policy-agent/conftest/parser/groovy"
 	"github.com/open-policy-agent/conftest/parser/hcl1"
 	"github.com/open-policy-agent/conftest/parser/hcl2"
 	"github.com/open-policy-agent/conftest/parser/hocon"
 	"github.com/open-policy-agent/conftest/parser/ignore"
 	"github.com/open-policy-agent/conftest/parser/ini"
 	"github.com/open-policy-agent/conftest/parser/json"
+	"github.com/open-policy-agent/conftest/parser/jsonc"
 	"github.com/open-policy-agent/conftest/parser/jsonnet"
+	"github.com/open-policy-agent/conftest/parser/nginx"
+	"github.com/open-policy-agent/conftest/parser/properties"
+	"github.com/open-policy-agent/conftest/parser/spdx"
+	"github.com/open-policy-agent/conftest/parser/textproto"
 	"github.com/open-policy-agent/conftest/parser/toml"
 	"github.com/open-policy-agent/conftest/parser/vcl"
 	"github.com/open-policy-agent/conftest/parser/xml"
@@ -28,26 +41,42 @@ import (
 // The defined parsers are the parsers that are valid for
 // parsing files.
 const (
-	TOML       = "toml"
+	CODEOWNERS = "codeowners"
+	CUE        = "cue"
+	CYCLONEDX  = "cyclonedx"
+	Dockerfile = "dockerfile"
+	EDN        = "edn"
+	GROOVY     = "groovy"
 	HCL1       = "hcl1"
 	HCL2       = "hcl2"
-	CUE        = "cue"
-	INI        = "ini"
 	HOCON      = "hocon"
-	Dockerfile = "dockerfile"
-	YAML       = "yaml"
+	IGNORE     = "ignore"
+	INI        = "ini"
 	JSON       = "json"
+	JSONC      = "jsonc"
 	JSONNET    = "jsonnet"
-	EDN        = "edn"
+	NGINX      = "nginx"
+	PROPERTIES = "properties"
+	SPDX       = "spdx"
+	TEXTPROTO  = "textproto"
+	TOML       = "toml"
 	VCL        = "vcl"
 	XML        = "xml"
-	IGNORE     = "ignore"
+	YAML       = "yaml"
+	DOTENV     = "dotenv"
 )
 
 // Parser defines all of the methods that every parser
 // definition must implement.
 type Parser interface {
-	Unmarshal(p []byte, v interface{}) error
+	Unmarshal(p []byte, v any) error
+}
+
+// PathAwareParser is an optional interface that parsers may implement
+// if they need the original file path for relative imports or other logic.
+type PathAwareParser interface {
+	Parser
+	SetPath(path string)
 }
 
 // New returns a new Parser.
@@ -71,56 +100,133 @@ func New(parser string) (Parser, error) {
 		return &yaml.Parser{}, nil
 	case JSON:
 		return &json.Parser{}, nil
+	case JSONC:
+		return &jsonc.Parser{}, nil
 	case JSONNET:
 		return &jsonnet.Parser{}, nil
+	case NGINX:
+		return &nginx.Parser{}, nil
 	case EDN:
 		return &edn.Parser{}, nil
+	case GROOVY:
+		return &groovy.Parser{}, nil
 	case VCL:
 		return &vcl.Parser{}, nil
 	case XML:
 		return &xml.Parser{}, nil
 	case IGNORE:
 		return &ignore.Parser{}, nil
+	case PROPERTIES:
+		return &properties.Parser{}, nil
+	case SPDX:
+		return &spdx.Parser{}, nil
+	case CYCLONEDX:
+		return &cyclonedx.Parser{}, nil
+	case DOTENV:
+		return &dotenv.Parser{}, nil
+	case TEXTPROTO:
+		parser := &textproto.Parser{}
+		if dirs := viper.GetStringSlice("proto-file-dirs"); len(dirs) > 0 {
+			files, err := findFilesWithExt(dirs, ".proto")
+			if err != nil {
+				return nil, fmt.Errorf("find proto files: %w", err)
+			}
+			if err := parser.LoadProtoFiles(files); err != nil {
+				return nil, fmt.Errorf("load protos: %w", err)
+			}
+		}
+
+		return parser, nil
+	case CODEOWNERS:
+		return &codeowners.Parser{}, nil
 	default:
 		return nil, fmt.Errorf("unknown parser: %v", parser)
 	}
 }
 
+func findFilesWithExt(dirs []string, ext string) ([]string, error) {
+	var files []string
+	for _, dir := range dirs {
+		err := filepath.Walk(dir, func(path string, info fs.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				return nil
+			}
+			if strings.HasSuffix(info.Name(), ext) {
+				files = append(files, path)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("walk dir %q: %w", dir, err)
+		}
+	}
+	return files, nil
+}
+
 // NewFromPath returns a file parser based on the file type
 // that exists at the given path.
 func NewFromPath(path string) (Parser, error) {
+
+	// We use the YAML parser as the default when passing in configuration
+	// data through standard input. This can be overridden by using the parser flag.
 	if path == "-" {
 		return New(YAML)
 	}
 
 	fileName := strings.ToLower(filepath.Base(path))
-	if fileName == "dockerfile" || strings.Contains(fileName, "dockerfile.") {
-		return New(Dockerfile)
+
+	fileExtension := ""
+	if len(filepath.Ext(path)) > 0 {
+		fileExtension = strings.ToLower(filepath.Ext(path)[1:])
 	}
 
-	// The yml file extension is the default when a file extension
-	// was not found.
-	fileExtension := "yml"
-	if len(filepath.Ext(path)) > 0 {
-		fileExtension = filepath.Ext(path)[1:]
+	// A Dockerfile can either be a file named Dockerfile, be prefixed with
+	// Dockerfile, or have Dockerfile as its extension.
+	//
+	// For example: Dockerfile, Dockerfile.debug, dev.Dockerfile
+	if fileName == "dockerfile" || strings.HasPrefix(fileName, "dockerfile.") || fileExtension == "dockerfile" {
+		return New(Dockerfile)
 	}
 
 	if fileExtension == "yml" || fileExtension == "yaml" {
 		return New(YAML)
 	}
 
-	if strings.EqualFold(fileExtension, "dockerfile") {
-		return New(Dockerfile)
-	}
-
-	// When parsing Terraform files, the default parser to use
-	// should be the latest HCL parser.
-	if fileExtension == "tf" || fileExtension == "tfvars" {
+	if fileExtension == "hcl" || fileExtension == "tf" || fileExtension == "tfvars" {
 		return New(HCL2)
 	}
 
 	if fileExtension == "gitignore" || fileExtension == "dockerignore" {
 		return New(IGNORE)
+	}
+
+	// A .env can either be a file named .env, be prefixed with
+	// .env, or have .env as its extension.
+	//
+	// For example: .env, .env.prod, prod.env
+	if fileName == ".env" || strings.HasPrefix(fileName, ".env.") || fileExtension == "env" {
+		return New(DOTENV)
+	}
+
+	if fileName == "nginx.conf" {
+		return New(NGINX)
+	}
+
+	// A Jenkinsfile can either be named Jenkinsfile or be prefixed with
+	// Jenkinsfile. For example: Jenkinsfile, Jenkinsfile.prod.
+	if fileName == "jenkinsfile" || strings.HasPrefix(fileName, "jenkinsfile.") {
+		return New(GROOVY)
+	}
+
+	if slices.Contains(textproto.TextProtoFileExtensions, fileExtension) {
+		return New(TEXTPROTO)
+	}
+
+	if fileName == "codeowners" {
+		return New(CODEOWNERS)
 	}
 
 	parser, err := New(fileExtension)
@@ -134,20 +240,28 @@ func NewFromPath(path string) (Parser, error) {
 // Parsers returns a list of the supported Parsers.
 func Parsers() []string {
 	parsers := []string{
-		TOML,
+		CODEOWNERS,
+		CUE,
+		CYCLONEDX,
+		Dockerfile,
+		EDN,
+		GROOVY,
 		HCL1,
 		HCL2,
-		CUE,
-		INI,
 		HOCON,
-		Dockerfile,
-		YAML,
+		IGNORE,
+		INI,
 		JSON,
 		JSONNET,
-		EDN,
+		NGINX,
+		PROPERTIES,
+		SPDX,
+		TEXTPROTO,
+		TOML,
 		VCL,
 		XML,
-		IGNORE,
+		YAML,
+		DOTENV,
 	}
 
 	return parsers
@@ -156,17 +270,14 @@ func Parsers() []string {
 // FileSupported returns true if the file at the given path is
 // a file that can be parsed.
 func FileSupported(path string) bool {
-	if _, err := NewFromPath(path); err != nil {
-		return false
-	}
-
-	return true
+	_, err := NewFromPath(path)
+	return err == nil
 }
 
 // ParseConfigurations parses and returns the configurations from the given
 // list of files. The result will be a map where the key is the file name of
 // the configuration.
-func ParseConfigurations(files []string) (map[string]interface{}, error) {
+func ParseConfigurations(files []string) (map[string]any, error) {
 	configurations, err := parseConfigurations(files, "")
 	if err != nil {
 		return nil, err
@@ -178,7 +289,7 @@ func ParseConfigurations(files []string) (map[string]interface{}, error) {
 // ParseConfigurationsAs parses the files as the given file type and returns the
 // configurations given in the file list. The result will be a map where the key
 // is the file name of the configuration.
-func ParseConfigurationsAs(files []string, parser string) (map[string]interface{}, error) {
+func ParseConfigurationsAs(files []string, parser string) (map[string]any, error) {
 	configurations, err := parseConfigurations(files, parser)
 	if err != nil {
 		return nil, err
@@ -190,15 +301,15 @@ func ParseConfigurationsAs(files []string, parser string) (map[string]interface{
 // CombineConfigurations takes the given configurations and combines them into a single
 // configuration. The result will be a map that contains a single key with a value of
 // Combined.
-func CombineConfigurations(configs map[string]interface{}) map[string]interface{} {
+func CombineConfigurations(configs map[string]any) map[string]any {
 	type configuration struct {
-		Path     string      `json:"path"`
-		Contents interface{} `json:"contents"`
+		Path     string `json:"path"`
+		Contents any    `json:"contents"`
 	}
 
 	var allConfigurations []configuration
 	for path, config := range configs {
-		if subconfigs, exist := config.([]interface{}); exist {
+		if subconfigs, exist := config.([]any); exist {
 			for _, subconfig := range subconfigs {
 				configuration := configuration{
 					Path:     path,
@@ -224,14 +335,17 @@ func CombineConfigurations(configs map[string]interface{}) map[string]interface{
 		return allConfigurations[i].Path < allConfigurations[j].Path
 	})
 
-	combinedConfigurations := make(map[string]interface{})
+	combinedConfigurations := make(map[string]any)
 	combinedConfigurations["Combined"] = allConfigurations
 
 	return combinedConfigurations
 }
 
-func parseConfigurations(paths []string, parser string) (map[string]interface{}, error) {
-	parsedConfigurations := make(map[string]interface{})
+func parseConfigurations(paths []string, parser string) (map[string]any, error) {
+	parsedConfigurations := make(map[string]any)
+	errWithPathInfo := func(err error, msg, path string) error {
+		return fmt.Errorf("%s: %w, path: %s", msg, err, path)
+	}
 	for _, path := range paths {
 		var fileParser Parser
 		var err error
@@ -241,17 +355,22 @@ func parseConfigurations(paths []string, parser string) (map[string]interface{},
 			fileParser, err = New(parser)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("new parser: %w", err)
+			return nil, errWithPathInfo(err, "new parser", path)
 		}
 
 		contents, err := getConfigurationContent(path)
 		if err != nil {
-			return nil, fmt.Errorf("get configuration content: %w", err)
+			return nil, errWithPathInfo(err, "get configuration content", path)
 		}
 
-		var parsed interface{}
+		// If our parser needs the path, give it the path
+		if p, ok := fileParser.(PathAwareParser); ok {
+			p.SetPath(path)
+		}
+
+		var parsed any
 		if err := fileParser.Unmarshal(contents, &parsed); err != nil {
-			return nil, fmt.Errorf("parser unmarshal: %w", err)
+			return nil, errWithPathInfo(err, "parser unmarshal", path)
 		}
 
 		parsedConfigurations[path] = parsed
@@ -262,7 +381,7 @@ func parseConfigurations(paths []string, parser string) (map[string]interface{},
 
 func getConfigurationContent(path string) ([]byte, error) {
 	if path == "-" {
-		contents, err := ioutil.ReadAll(bufio.NewReader(os.Stdin))
+		contents, err := io.ReadAll(bufio.NewReader(os.Stdin))
 		if err != nil {
 			return nil, fmt.Errorf("read standard in: %w", err)
 		}
@@ -275,7 +394,7 @@ func getConfigurationContent(path string) ([]byte, error) {
 		return nil, fmt.Errorf("get abs: %w", err)
 	}
 
-	contents, err := ioutil.ReadFile(filePath)
+	contents, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("open file: %w", err)
 	}

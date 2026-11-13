@@ -1,23 +1,67 @@
-linter-settings:
-  misspell:
-    locale: US
-
+version: "2"
 linters:
-  disable-all: true
+  default: none
   enable:
     - errcheck
+    - goconst
+    - gosec
     - govet
     - ineffassign
-    - golint
-    - goconst
+    - makezero
+    - misspell
+    - nilerr
+    - predeclared
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+    - wastedassign
+  settings:
+    govet:
+      enable:
+        - nilness
+    misspell:
+      locale: US
+    revive:
+      rules:
+        - name: var-naming
+          # Arguments accepts an allow list, a deny list, and a map of other options.
+          # https://github.com/mgechev/revive/blob/HEAD/RULES_DESCRIPTIONS.md#var-naming
+          arguments:
+            - [] # Allow list. Do not remove because ordering matters.
+            - [] # Deny list. Do not remove because ordering matters.
+            - 
+              - skip-package-name-collision-with-go-std: true
+    staticcheck:
+      checks:
+        # These are processed in order. It is important that the inclusion
+        # comes before the exclusion.
+        - all
+        - -SA1019
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # Repeated string literals in table-driven tests are intentional.
+      - path: _test\.go
+        linters:
+          - goconst
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
     - gofmt
     - goimports
-    - unused
-    - varcheck
-    - deadcode
-    - misspell
-    - typecheck
-    - structcheck
-    - staticcheck
-    - gosimple
-    - gosec
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

@@ -3,6 +3,7 @@ package output
 import (
 	"fmt"
 	"io"
+	"slices"
 )
 
 // TAP represents an Outputter that outputs
@@ -21,7 +22,17 @@ func NewTAP(w io.Writer) *TAP {
 }
 
 // Output outputs the results.
-func (t *TAP) Output(checkResults []CheckResult) error {
+func (t *TAP) Output(checkResults CheckResults) error {
+	// TAP expects a single plan for the whole stream, with test numbers
+	// continuing across all of the checks.
+	totalTests := checkResults.Totals().Tests()
+	if totalTests == 0 {
+		return nil
+	}
+
+	fmt.Fprintf(t.Writer, "1..%d\n", totalTests)
+
+	counter := 1
 	for _, result := range checkResults {
 		var indicator string
 		var namespace string
@@ -37,47 +48,24 @@ func (t *TAP) Output(checkResults []CheckResult) error {
 			namespace = fmt.Sprintf("- %s -", result.Namespace)
 		}
 
-		totalTests := result.Successes + len(result.Failures) + len(result.Warnings) + len(result.Exceptions) + len(result.Skipped)
-		if totalTests == 0 {
-			return nil
+		sections := []struct {
+			header  string
+			status  string
+			results []Result
+		}{
+			{status: "not ok", results: result.Failures},
+			{header: "warnings", status: "not ok", results: result.Warnings},
+			{header: "exceptions", status: "ok", results: result.Exceptions},
+			{header: "skip", status: "ok", results: result.Skipped},
+			{header: "successes", status: "ok", results: slices.Repeat([]Result{{Message: "SUCCESS"}}, result.Successes)},
 		}
 
-		counter := 1
-		fmt.Fprintf(t.Writer, "1..%d\n", totalTests)
-
-		for _, failure := range result.Failures {
-			fmt.Fprintf(t.Writer, "not ok %v %v %v %v\n", counter, indicator, namespace, failure.Message)
-			counter++
-		}
-
-		if len(result.Warnings) > 0 {
-			fmt.Fprintln(t.Writer, "# warnings")
-			for _, warning := range result.Warnings {
-				fmt.Fprintf(t.Writer, "not ok %v %v %v %v\n", counter, indicator, namespace, warning.Message)
-				counter++
+		for _, section := range sections {
+			if section.header != "" && len(section.results) > 0 {
+				fmt.Fprintln(t.Writer, "#", section.header)
 			}
-		}
-
-		if len(result.Exceptions) > 0 {
-			fmt.Fprintln(t.Writer, "# exceptions")
-			for _, exception := range result.Exceptions {
-				fmt.Fprintf(t.Writer, "ok %v %v %v %v\n", counter, indicator, namespace, exception.Message)
-				counter++
-			}
-		}
-
-		if len(result.Skipped) > 0 {
-			fmt.Fprintln(t.Writer, "# skip")
-			for _, skipped := range result.Skipped {
-				fmt.Fprintf(t.Writer, "ok %v %v %v %v\n", counter, indicator, namespace, skipped.Message)
-				counter++
-			}
-		}
-
-		if result.Successes > 0 {
-			fmt.Fprintln(t.Writer, "# successes")
-			for i := 0; i < result.Successes; i++ {
-				fmt.Fprintf(t.Writer, "ok %v %v %v %v", counter, indicator, namespace, "SUCCESS")
+			for _, r := range section.results {
+				fmt.Fprintf(t.Writer, "%s %d %s %s %s\n", section.status, counter, indicator, namespace, r.Message)
 				counter++
 			}
 		}

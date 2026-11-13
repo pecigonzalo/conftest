@@ -19,6 +19,11 @@ func TestOCIDetector_Detect(t *testing.T) {
 			"oci://gcr.io/conftest/policies:tag",
 		},
 		{
+			"should detect google artifact registry",
+			"region-docker.pkg.dev/conftest/policies:tag",
+			"oci://region-docker.pkg.dev/conftest/policies:tag",
+		},
+		{
 			"should detect ecr",
 			"123456789012.dkr.ecr.us-east-1.amazonaws.com/conftest/policies:tag",
 			"oci://123456789012.dkr.ecr.us-east-1.amazonaws.com/conftest/policies:tag",
@@ -48,18 +53,42 @@ func TestOCIDetector_Detect(t *testing.T) {
 			"localhost:5000/policies",
 			"oci://localhost:5000/policies:latest",
 		},
+		{
+			"should detect Quay",
+			"quay.io/conftest/policies:tag",
+			"oci://quay.io/conftest/policies:tag",
+		},
+		{
+			"should detect localhost:32123/policies:tag as most likely being an OCI registry",
+			"localhost:32123/policies:tag",
+			"oci://localhost:32123/policies:tag",
+		},
+		{
+			"should detect 127.0.0.1:32123/policies:tag as most likely being an OCI registry",
+			"127.0.0.1:32123/policies:tag",
+			"oci://127.0.0.1:32123/policies:tag",
+		},
+		{
+			"should detect ::1:32123/policies:tag as most likely being an OCI registry",
+			"::1:32123/policies:tag",
+			"oci://::1:32123/policies:tag",
+		},
 	}
+
 	pwd := "/pwd"
 	d := &OCIDetector{}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out, ok, err := d.Detect(tt.input, pwd)
 			if err != nil {
 				t.Fatalf("OCIDetector.Detect() error = %v", err)
 			}
+
 			if !ok {
 				t.Fatal("OCIDetector.Detect() not ok, should have detected")
 			}
+
 			if out != tt.expected {
 				t.Errorf("OCIDetector.Detect() output = %v, want %v", out, tt.expected)
 			}

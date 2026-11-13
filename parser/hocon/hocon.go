@@ -1,41 +1,32 @@
 package hocon
 
 import (
-	"encoding/json"
-	"fmt"
 	"strconv"
 
 	"github.com/go-akka/configuration"
 	"github.com/go-akka/configuration/hocon"
+
+	"github.com/open-policy-agent/conftest/parser/internal/convert"
 )
 
 // Parser is a HOCON parser.
 type Parser struct{}
 
 // Unmarshal unmarshals HOCON files.
-func (i *Parser) Unmarshal(p []byte, v interface{}) error {
+func (i *Parser) Unmarshal(p []byte, v any) error {
 	rootCfg := configuration.ParseString(string(p))
-	result := make(map[string]interface{})
+	result := make(map[string]any)
 
 	for _, key := range rootCfg.Root().GetObject().GetKeys() {
 		cfg := rootCfg.GetConfig(key)
 		result[key] = getConfig(rootCfg, cfg, key)
 	}
 
-	j, err := json.Marshal(result)
-	if err != nil {
-		return fmt.Errorf("marshal hocon to json: %w", err)
-	}
-
-	if err := json.Unmarshal(j, v); err != nil {
-		return fmt.Errorf("unmarshal hocon json: %w", err)
-	}
-
-	return nil
+	return convert.Remarshal("hocon", result, v)
 }
 
-func getConfig(rootCfg, cfg *configuration.Config, path string) map[string]interface{} {
-	result := make(map[string]interface{})
+func getConfig(rootCfg, cfg *configuration.Config, path string) map[string]any {
+	result := make(map[string]any)
 
 	for _, key := range cfg.Root().GetObject().GetKeys() {
 		tmpKey := path + "." + key
@@ -50,7 +41,7 @@ func getConfig(rootCfg, cfg *configuration.Config, path string) map[string]inter
 	return result
 }
 
-func convertType(value *hocon.HoconValue) interface{} {
+func convertType(value *hocon.HoconValue) any {
 	str := value.String()
 	switch {
 	case isNumberLiteral(str):

@@ -26,6 +26,16 @@ Before submitting large changes, please open an issue on GitHub outlining:
 
 Use your judgment about what constitutes a large change. If you aren't sure, send a message to the `#conftest` channel in the OPA slack or submit an issue on GitHub.
 
+## v1 Migration
+
+`master` is the development branch for v1. While the migration is in progress:
+
+- New code must meet the v1 APIs. Changes that only build against the 0.x APIs
+  will be sent back for rework.
+- Changes are not backported for you. If you want your feature to apply to the
+  0.x release train as well, open a separate Pull Request against the
+  `releases/0.x` branch.
+
 ## Code Contributions
 
 If you are contributing code, please consider the following:
@@ -33,6 +43,7 @@ If you are contributing code, please consider the following:
 - Most changes should be accompanied by tests.
 - All commits must be signed off (see next section).
 - Related commits must be squashed before they are merged.
+- All commits must have a [conventional commit prefix](https://www.conventionalcommits.org/en/v1.0.0/#summary), such as `feat:`, `fix:`, etc.
 - All tests must pass.
 
 If you are new to Go, consider reading [Effective
@@ -45,7 +56,7 @@ guidance on writing idiomatic Go code.
 Commit messages should explain *why* the changes were made and should probably look like this:
 
 ```
-Description of the change in 50 characters or less
+fix: Description of a bug fix in 50 characters or less
 
 More detail on what was changed. Provide some background on the issue
 and describe how the changes address the issue. Feel free to use multiple

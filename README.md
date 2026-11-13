@@ -7,22 +7,22 @@ write tests for your Kubernetes configuration, Tekton pipeline definitions, Terr
 Serverless configs or any other config files.
 
 Conftest uses the Rego language from [Open Policy Agent](https://www.openpolicyagent.org/) for writing
-the assertions. You can read more about Rego in [How do I write policies](https://www.openpolicyagent.org/docs/how-do-i-write-policies.html)
-in the Open Policy Agent documentation.
+the assertions. You can read more about Rego in the [Policy Language](https://www.openpolicyagent.org/docs/policy-language)
+section in the Open Policy Agent documentation.
 
 Here's a quick example. Save the following as `policy/deployment.rego`:
 
 ```rego
 package main
 
-deny[msg] {
+deny contains msg if {
   input.kind == "Deployment"
   not input.spec.template.spec.securityContext.runAsNonRoot
 
   msg := "Containers must not run as root"
 }
 
-deny[msg] {
+deny contains msg if {
   input.kind == "Deployment"
   not input.spec.selector.matchLabels.app
 
@@ -49,4 +49,4 @@ more details about the features.
 * See [CONTRIBUTING.md](CONTRIBUTING.md) to get started.
 
 For discussions and questions join us on the [Open Policy Agent Slack](https://slack.openpolicyagent.org/)
-in the `#conftest` channel.
+in the `#opa-conftest` channel.

@@ -2,11 +2,17 @@ package parser
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/open-policy-agent/conftest/parser/docker"
+	dotenv "github.com/open-policy-agent/conftest/parser/dotenv"
+	"github.com/open-policy-agent/conftest/parser/groovy"
 	"github.com/open-policy-agent/conftest/parser/hcl2"
 	"github.com/open-policy-agent/conftest/parser/ignore"
+	"github.com/open-policy-agent/conftest/parser/json"
+	"github.com/open-policy-agent/conftest/parser/jsonc"
+	"github.com/open-policy-agent/conftest/parser/textproto"
 	"github.com/open-policy-agent/conftest/parser/yaml"
 )
 
@@ -57,6 +63,26 @@ func TestNewFromPath(t *testing.T) {
 			false,
 		},
 		{
+			"test.groovy",
+			&groovy.Parser{},
+			false,
+		},
+		{
+			"Jenkinsfile",
+			&groovy.Parser{},
+			false,
+		},
+		{
+			"jEnKiNsFiLe",
+			&groovy.Parser{},
+			false,
+		},
+		{
+			"Jenkinsfile.prod",
+			&groovy.Parser{},
+			false,
+		},
+		{
 			"dockerfile.foo",
 			&docker.Parser{},
 			false,
@@ -72,9 +98,29 @@ func TestNewFromPath(t *testing.T) {
 			false,
 		},
 		{
-			"noextension",
-			&yaml.Parser{},
+			"terragrunt.hcl",
+			&hcl2.Parser{},
 			false,
+		},
+		{
+			"terragrunt.hcl.json",
+			&json.Parser{},
+			false,
+		},
+		{
+			"terragrunt.hcl.jsonc",
+			&jsonc.Parser{},
+			false,
+		},
+		{
+			"noextension",
+			nil,
+			true,
+		},
+		{
+			"LICENSE",
+			nil,
+			true,
 		},
 		{
 			".gitignore",
@@ -85,6 +131,26 @@ func TestNewFromPath(t *testing.T) {
 			"file.unknown",
 			nil,
 			true,
+		},
+		{
+			".env",
+			&dotenv.Parser{},
+			false,
+		},
+		{
+			"prod.env",
+			&dotenv.Parser{},
+			false,
+		},
+		{
+			".env.prod",
+			&dotenv.Parser{},
+			false,
+		},
+		{
+			"foo.textproto",
+			&textproto.Parser{},
+			false,
 		},
 	}
 
@@ -103,5 +169,26 @@ func TestNewFromPath(t *testing.T) {
 				t.Errorf("Unexpected parser. expected %v actual %v", expectedType, actualType)
 			}
 		})
+	}
+}
+
+func TestParsersIncludesCycloneDX(t *testing.T) {
+	if !slices.Contains(Parsers(), CYCLONEDX) {
+		t.Fatalf("Parsers() should include %q", CYCLONEDX)
+	}
+}
+
+func TestGroovyParserRegistered(t *testing.T) {
+	actual, err := New(GROOVY)
+	if err != nil {
+		t.Fatal("new groovy parser:", err)
+	}
+
+	if _, ok := actual.(*groovy.Parser); !ok {
+		t.Fatalf("unexpected parser type %T", actual)
+	}
+
+	if !slices.Contains(Parsers(), GROOVY) {
+		t.Errorf("expected %q in registered parsers", GROOVY)
 	}
 }

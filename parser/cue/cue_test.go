@@ -5,13 +5,16 @@ import (
 )
 
 func TestCueParser(t *testing.T) {
-	p := `package kubernetes
-
-	deployment "hello-kubernetes": {
-		apiVersion: "apps/v1"
-		spec: {
-			replicas: 3
-			template spec containers: [{
+	p := `apiVersion: "apps/v1"
+	kind:       "Deployment"
+	metadata: name: "hello-kubernetes"
+	spec: {
+		replicas: 3
+		selector: matchLabels: app: "hello-kubernetes"
+		template: {
+			metadata: labels: app: "hello-kubernetes"
+			spec: containers: [{
+				name:  "hello-kubernetes"
 				image: "paulbouwer/hello-kubernetes:1.5"
 				ports: [{
 					containerPort: 8080
@@ -22,7 +25,7 @@ func TestCueParser(t *testing.T) {
 
 	parser := &Parser{}
 
-	var input interface{}
+	var input any
 	if err := parser.Unmarshal([]byte(p), &input); err != nil {
 		t.Fatalf("parser should not have thrown an error: %v", err)
 	}
@@ -31,9 +34,9 @@ func TestCueParser(t *testing.T) {
 		t.Error("There should be information parsed but its nil")
 	}
 
-	inputMap := input.(map[string]interface{})
-	item := inputMap["deployment"]
-	if len(item.(map[string]interface{})) <= 0 {
-		t.Error("There should be at least one item defined in the parsed file, but none found")
+	inputMap := input.(map[string]any)
+	kind := inputMap["kind"]
+	if kind != "Deployment" {
+		t.Error("Parsed cuelang file should be a deployment, but was not")
 	}
 }

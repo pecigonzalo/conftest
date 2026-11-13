@@ -3,14 +3,17 @@ package downloader
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"net/url"
 	"os"
+	"strings"
 
-	auth "github.com/deislabs/oras/pkg/auth/docker"
-	"github.com/deislabs/oras/pkg/content"
-	"github.com/deislabs/oras/pkg/oras"
+	reg "github.com/open-policy-agent/conftest/internal/registry"
+
 	getter "github.com/hashicorp/go-getter"
+	"oras.land/oras-go/v2"
+	"oras.land/oras-go/v2/content/file"
+	"oras.land/oras-go/v2/registry"
+	"oras.land/oras-go/v2/registry/remote"
 )
 
 // OCIGetter is responsible for handling OCI repositories
@@ -19,7 +22,7 @@ type OCIGetter struct {
 }
 
 // ClientMode returns the client mode directory
-func (g *OCIGetter) ClientMode(u *url.URL) (getter.ClientMode, error) {
+func (g *OCIGetter) ClientMode(_ *url.URL) (getter.ClientMode, error) {
 	return getter.ClientModeDir, nil
 }
 
@@ -27,27 +30,37 @@ func (g *OCIGetter) ClientMode(u *url.URL) (getter.ClientMode, error) {
 func (g *OCIGetter) Get(path string, u *url.URL) error {
 	ctx := g.Context()
 
+	repository := ociURL(u)
+	ref, err := registry.ParseReference(repository)
+	if err != nil {
+		return fmt.Errorf("reference: %w", err)
+	}
+
+	if ref.Reference == "" {
+		ref.Reference = "latest"
+		repository = ref.String()
+	}
+
+	src, err := remote.NewRepository(repository)
+	if err != nil {
+		return fmt.Errorf("repository: %w", err)
+	}
+
+	if err := reg.SetupClient(src); err != nil {
+		return fmt.Errorf("registry client setup: %w", err)
+	}
+
 	if err := os.MkdirAll(path, os.ModePerm); err != nil {
 		return fmt.Errorf("make policy directory: %w", err)
 	}
 
-	cli, err := auth.NewClient()
+	fileStore, err := file.New(path)
 	if err != nil {
-		return fmt.Errorf("new auth client: %w", err)
+		return fmt.Errorf("file store: %w", err)
 	}
-
-	resolver, err := cli.Resolver(ctx, http.DefaultClient, false)
-	if err != nil {
-		return fmt.Errorf("new resolver: %w", err)
-	}
-
-	fileStore := content.NewFileStore(path)
 	defer fileStore.Close()
 
-	repository := getRepositoryFromURL(u.Path)
-	pullURL := u.Host + repository
-
-	_, _, err = oras.Pull(ctx, resolver, pullURL, fileStore)
+	_, err = oras.Copy(ctx, src, repository, fileStore, "", oras.DefaultCopyOptions)
 	if err != nil {
 		return fmt.Errorf("pulling policy: %w", err)
 	}
@@ -56,7 +69,7 @@ func (g *OCIGetter) Get(path string, u *url.URL) error {
 }
 
 // GetFile is currently a NOOP
-func (g *OCIGetter) GetFile(dst string, u *url.URL) error {
+func (g *OCIGetter) GetFile(_ string, _ *url.URL) error {
 	return nil
 }
 
@@ -72,4 +85,14 @@ func (g *OCIGetter) Context() context.Context {
 		return context.Background()
 	}
 	return g.client.Ctx
+}
+
+// ociURL returns the string representation of the url that is an acceptable
+// OCI URL. In short, it strips off the scheme, e.g. "https://", from the URL.
+func ociURL(u *url.URL) string {
+	scheme, url, found := strings.Cut(u.String(), "://")
+	if !found {
+		url = scheme
+	}
+	return url
 }

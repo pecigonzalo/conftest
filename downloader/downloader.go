@@ -3,6 +3,8 @@ package downloader
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	getter "github.com/hashicorp/go-getter"
@@ -29,29 +31,141 @@ var getters = map[string]getter.Getter{
 	"https": new(getter.HttpGetter),
 }
 
+type downloadConfig struct {
+	overwrite bool
+}
+
+// DownloadOption configures a policy download.
+type DownloadOption func(*downloadConfig)
+
+// WithOverwrite replaces an existing policy file after its update downloads successfully.
+func WithOverwrite() DownloadOption {
+	return func(config *downloadConfig) {
+		config.overwrite = true
+	}
+}
+
 // Download downloads the given policies into the given destination.
-func Download(ctx context.Context, dst string, urls []string) error {
-	opts := []getter.ClientOption{}
+func Download(ctx context.Context, dst string, urls []string, opts ...DownloadOption) error {
+	config := downloadConfig{}
+	for _, opt := range opts {
+		opt(&config)
+	}
+
 	for _, url := range urls {
 		detectedURL, err := Detect(url, dst)
 		if err != nil {
 			return fmt.Errorf("detecting url: %w", err)
 		}
 
-		client := &getter.Client{
-			Ctx:       ctx,
-			Src:       detectedURL,
-			Dst:       dst,
-			Pwd:       dst,
-			Mode:      getter.ClientModeAny,
-			Detectors: detectors,
-			Getters:   getters,
-			Options:   opts,
+		// Check if the download target already exists. Git sources clone
+		// directly into dst (see the get() call below), so the target to
+		// check is dst itself; other sources are downloaded as a single
+		// file named filename inside dst.
+		filename := filepath.Base(detectedURL)
+		isGitSource := strings.HasPrefix(detectedURL, "git::")
+		targetPath := filepath.Join(dst, filename)
+		if isGitSource {
+			targetPath = dst
 		}
 
-		if err := client.Get(); err != nil {
-			return fmt.Errorf("client get: %w", err)
+		targetInfo, err := os.Stat(targetPath)
+		if err == nil {
+			switch {
+			case isGitSource && targetInfo.IsDir():
+				// Git sources intentionally skip the "refuse to overwrite"
+				// guard below: a pre-existing, non-empty directory is
+				// expected to already be a checkout that go-getter will
+				// update in place using git's own semantics. Only an empty
+				// directory needs to be removed so go-getter clones into it
+				// fresh instead of mistaking it for an existing checkout.
+				if config.overwrite {
+					if err := removeEmptyDestination(dst); err != nil {
+						return err
+					}
+				}
+			case !config.overwrite:
+				return fmt.Errorf("policy file already exists at %s, refusing to overwrite", targetPath)
+			case !targetInfo.IsDir():
+				if err := overwriteFile(ctx, detectedURL, dst, filename); err != nil {
+					return err
+				}
+				continue
+			}
 		}
+
+		if err := get(ctx, detectedURL, dst, dst); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// removeEmptyDestination removes dst if it exists but is empty. go-getter's
+// git getter decides whether to clone or update a destination based solely
+// on whether it already exists, so a pre-existing, empty directory (created
+// ahead of time, e.g. by Atlantis, but not yet cloned into) is mistaken for
+// an existing checkout, and the update fails because it isn't actually a git
+// repository. Removing the empty directory lets go-getter clone into it
+// fresh, as it would if the directory never existed.
+func removeEmptyDestination(dst string) error {
+	if entries, err := os.ReadDir(dst); err == nil && len(entries) == 0 {
+		if err := os.Remove(dst); err != nil {
+			return fmt.Errorf("remove empty policy directory: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func get(ctx context.Context, src string, dst string, pwd string) error {
+	opts := []getter.ClientOption{}
+	client := &getter.Client{
+		Ctx:       ctx,
+		Src:       src,
+		Dst:       dst,
+		Pwd:       pwd,
+		Mode:      getter.ClientModeAny,
+		Detectors: detectors,
+		Getters:   getters,
+		Options:   opts,
+	}
+
+	if err := client.Get(); err != nil {
+		return fmt.Errorf("client get: %w", err)
+	}
+
+	return nil
+}
+
+func overwriteFile(ctx context.Context, src string, dst string, filename string) error {
+	stagingDir, err := os.MkdirTemp("", ".conftest-update-*")
+	if err != nil {
+		return fmt.Errorf("create update staging directory: %w", err)
+	}
+	defer os.RemoveAll(stagingDir)
+
+	if err := get(ctx, src, stagingDir, dst); err != nil {
+		return err
+	}
+
+	stagedPath := filepath.Join(stagingDir, filename)
+	targetPath := filepath.Join(dst, filename)
+	if err := replaceFile(stagedPath, targetPath); err != nil {
+		return fmt.Errorf("replace policy file: %w", err)
+	}
+
+	return nil
+}
+
+func replaceFile(src string, dst string) error {
+	if err := os.Remove(dst); err != nil {
+		return fmt.Errorf("remove existing file: %w", err)
+	}
+
+	if err := os.Rename(src, dst); err != nil {
+		return fmt.Errorf("install updated file: %w", err)
 	}
 
 	return nil

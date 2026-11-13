@@ -2,25 +2,77 @@ name: pr
 
 on: [pull_request]
 
+permissions: {}
+
 jobs:
-  validate:
+  lint:
     runs-on: ubuntu-latest
     steps:
-      - name: checkout source
-        uses: actions/checkout@v2
+      - name: checkout all PR branch and commits
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: ${{ github.event.pull_request.commits }}
 
       - name: setup go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v6
         with:
-          go-version: "^1.16.0"
+          go-version-file: 'go.mod'
 
-      - name: setup bats
-        uses: mig4/setup-bats@v1
+      - name: validate conventional commit prefix
+        working-directory: scripts
+        run: ./validate-conventional-commit-prefix.sh
 
-      - name: lint go
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s v1.39.0
-          ./bin/golangci-lint run --timeout=5m --color=always --max-same-issues=0 --max-issues-per-linter=0
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # ratchet:golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+          only-new-issues: true
+          args: --timeout=5m --color=always --max-same-issues=0 --max-issues-per-linter=0
+
+      - name: setup regal
+        uses: open-policy-agent/setup-regal@761188c3b435761fa254beca508a44875619648f # ratchet:open-policy-agent/setup-regal@v2.0.0
+        with:
+          version: v0.30
+
+      - name: lint examples - warnings
+        continue-on-error: true # Regal returns non-zero even with fail-level set to warning.
+        run: >-
+          regal lint
+          examples
+          --disable directory-package-mismatch
+          --disable unresolved-import
+          --format github
+
+      - name: lint examples - blocking
+        run: >-
+          regal lint
+          examples
+          --disable-all
+          --enable-category bugs
+          --format github
+
+      - name: ratchet
+        uses: sethvargo/ratchet@9ca118155b0f79464185703a50da367e111107cd # ratchet:sethvargo/ratchet@main
+        with:
+          files: .github/workflows/*.yaml
+
+  validate:
+    strategy:
+      matrix:
+        os:
+          - 'ubuntu-latest'
+          - 'macos-latest'
+          - 'windows-latest'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v5
+
+      - name: setup go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
 
       - name: build
         run: make build
@@ -28,8 +80,62 @@ jobs:
       - name: unit test
         run: make test
 
-      - name: test examples
+      # Ensure Actions runner has Python installed
+      # This is required for pre-commit tests to work
+      - name: setup python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # ratchet:actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: setup bats
+        uses: bats-core/bats-action@3566550e0f594451ac0f58fcbfdeca93aa29a45e # ratchet:bats-core/bats-action@4.1.0
+        with:
+          # Pin bats version to fix CI issue: https://github.com/bats-core/bats-action/pull/4
+          bats-version: "1.10.0"
+          support-install: false
+          assert-install: false
+          detik-install: false
+          file-install: false
+
+      - name: test examples (nix)
+        if: ${{ matrix.os != 'windows-latest' }}
         run: make test-examples
 
-      - name: acceptance
+      - name: test examples (windows)
+        if: ${{ matrix.os == 'windows-latest' }}
+        run: |
+          $env:Path += ";C:\Users\runneradmin\.local\share\bats\bin"
+          make test-examples
+
+      - name: acceptance (*nix)
+        if: ${{ matrix.os != 'windows-latest' }}
         run: make test-acceptance
+
+      # TODO: Uncomment as a part of https://github.com/open-policy-agent/conftest/issues/1203
+      # - name: acceptance (windows)
+      #   if: ${{ matrix.os == 'windows-latest' }}
+      #   run: |
+      #     $env:Path += ";C:\Users\runneradmin\.local\share\bats\bin"
+      #     make test-acceptance
+
+      - name: test oci push/pull
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        run: ./scripts/push-pull-e2e.sh
+
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v5
+
+      - name: install nix
+        uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # ratchet:cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: check flake
+        run: nix flake check
+
+      - name: verify dev shell tools
+        run: nix develop --command go version

@@ -1,17 +1,18 @@
 package ignore
 
 import (
-	"encoding/json"
 	"fmt"
 
 	ignore "github.com/shteou/go-ignore"
+
+	"github.com/open-policy-agent/conftest/parser/internal/convert"
 )
 
 // Parser is a ignore (dockerignore, gitignore) parser.
 type Parser struct{}
 
 // Unmarshal unmarshals ignore files.
-func (pp *Parser) Unmarshal(p []byte, v interface{}) error {
+func (pp *Parser) Unmarshal(p []byte, v any) error {
 	ignoreEntries, err := ignore.ParseIgnoreBytes(p)
 	if err != nil {
 		return fmt.Errorf("parse ignore bytes: %w", err)
@@ -21,14 +22,5 @@ func (pp *Parser) Unmarshal(p []byte, v interface{}) error {
 	// treated as a single file.
 	entryListList := [][]ignore.Entry{ignoreEntries}
 
-	marshalledLines, err := json.Marshal(entryListList)
-	if err != nil {
-		return fmt.Errorf("marshal ignore: %w", err)
-	}
-
-	if err := json.Unmarshal(marshalledLines, v); err != nil {
-		return fmt.Errorf("unmarshal ignore: %w", err)
-	}
-
-	return nil
+	return convert.Remarshal("ignore", entryListList, v)
 }

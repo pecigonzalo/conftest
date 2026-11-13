@@ -22,9 +22,9 @@ func NewTable(w io.Writer) *Table {
 }
 
 // Output outputs the results.
-func (t *Table) Output(checkResults []CheckResult) error {
-	table := tablewriter.NewWriter(t.Writer)
-	table.SetHeader([]string{"result", "file", "namespace", "message"})
+func (t *Table) Output(checkResults CheckResults) error {
+	table := tablewriter.NewTable(t.Writer)
+	table.Header("result", "file", "namespace", "message")
 
 	var tableData [][]string
 	for _, checkResult := range checkResults {
@@ -48,11 +48,12 @@ func (t *Table) Output(checkResults []CheckResult) error {
 			tableData = append(tableData, []string{"failure", checkResult.FileName, checkResult.Namespace, result.Message})
 		}
 	}
-
-	if len(tableData) > 0 {
-		table.AppendBulk(tableData)
-		table.Render()
+	if len(tableData) == 0 {
+		return nil
 	}
 
-	return nil
+	if err := table.Bulk(tableData); err != nil {
+		return err
+	}
+	return table.Render()
 }

@@ -2,17 +2,22 @@
 
 ## Configuration
 
-Options for Conftest can be configured on the command line as flag arguments, environment variables, or a configuration file.
+Options for Conftest can be configured on the command line as flag arguments,
+environment variables, or a configuration file.
 
-When multiple configuration sources are present, Conftest will process the configuration values in the following order:
+When multiple configuration sources are present, Conftest will process the
+configuration values in the following order:
 
 1. Flag Arguments
 1. Environment Variables
 1. Configuration File
 
-When using environment variables, the environment variable should be the same name as the flag, prefixed with `CONFTEST_`. For example, to set the policy directory, the environment variable would be `CONFTEST_POLICY`.
+When using environment variables, the environment variable should be the same
+name as the flag, prefixed with `CONFTEST_`. For example, to set the policy
+directory, the environment variable would be `CONFTEST_POLICY`.
 
-When using a configuration file, the configuration file should be in the working directory for Conftest and named `conftest.toml`. An example can be found below:
+When using a configuration file, the configuration file should be in the working
+directory for Conftest and named `conftest.toml`. An example can be found below:
 
 ```toml
 # You can override the directory in which to store and look for policies
@@ -24,9 +29,14 @@ namespace = "conftest"
 
 ## `--combine`
 
-This flag introduces *BREAKING CHANGES* in how Conftest provides input to rego policies. However, you may find it useful to use as it allows you to compare multiple values from different configurations simultaneously.
+This flag introduces *BREAKING CHANGES* in how Conftest provides input to rego
+policies. However, you may find it useful to use as it allows you to compare
+multiple values from different configurations simultaneously.
 
-The `--combine` flag combines files into one `input` data structure. The structure is an `array` where each element is a `map` with two keys: a `path` key with the relative file path of the file being evaluated and a `contents` key containing the actual document.
+The `--combine` flag combines files into one `input` data structure. The
+structure is an `array` where each element is a `map` with two keys: a `path`
+key with the relative file path of the file being evaluated and a `contents` key
+containing the actual document.
 
 Let's try it!
 
@@ -35,16 +45,17 @@ Save the following as `policy/combine.rego`:
 ```rego
 package main
 
-deny[msg] {
-  input[deployment].contents.kind == "Deployment"
-  deployment := input[deployment].contents
+deny contains msg if {
+  input[i].contents.kind == "Deployment"
+
+  deployment := input[i].contents
 
   not service_selects_app(deployment.spec.selector.matchLabels.app)
 
-  msg := sprintf("Deployment %v has selector %v that does not match any Services", [deployment.metadata.name, deployment.spec.selector.matchLabels.app])
+  msg := sprintf("Deployment %v with selector %v does not match any Services", [deployment.metadata.name, deployment.spec.selector.matchLabels])
 }
 
-service_selects_app(app) {
+service_selects_app(app) if {
   input[service].contents.kind == "Service"
   input[service].contents.spec.selector.app == app
 }
@@ -86,7 +97,8 @@ FAIL - Combined - Deployment hello-kubernetes has selector hello-kubernetes that
 1 test, 0 passed, 0 warnings, 1 failure, 0 exceptions
 ```
 
-It is also possible to pass in multiple files. Creating `.yaml` file for both the `Service` and the `Deployment`.
+It is also possible to pass in multiple files. Creating `.yaml` file for both
+the `Service` and the `Deployment`.
 
 ```console
 $ conftest test service.yaml deployment.yaml --combine
@@ -96,19 +108,33 @@ FAIL - Combined - Deployment hello-kubernetes has selector hello-kubernetes that
 1 test, 0 passed, 0 warnings, 1 failure, 0 exceptions
 ```
 
-This is just the tip of the iceberg. Now you can ensure that duplicate values match across the entirety of your configuration files.
+This is just the tip of the iceberg. Now you can ensure that duplicate values
+match across the entirety of your configuration files.
+
+## `--config-file (-c)`
+
+Sets the location of the Conftest configuration file
+
+For example:
+
+```console
+conftest -c examples/configfile/conftest.toml test -p examples/configfile/test examples/configfile/deployment.yaml
+```
 
 ## `--data`
 
 Sometimes policies require additional data in order to determine an answer.
 
-For example, an allowed list of resources that can be created. Instead of hardcoding this information inside of your policy, conftest allows passing paths to data files with the `--data` flag.
+For example, an allowed list of resources that can be created. Instead of
+hardcoding this information inside of your policy, conftest allows passing paths
+to data files with the `--data` flag.
 
 ```console
 conftest test -p examples/data/policy -d examples/data/exclusions examples/data/service.yaml
 ```
 
-The paths at the flag are recursively searched for JSON and YAML files. Data can be imported as follows:
+The paths at the flag are recursively searched for JSON and YAML files. Data can
+be imported as follows:
 
 Given the following yaml file:
 
@@ -128,7 +154,9 @@ ports := services.ports
 
 ## `--fail-on-warn`
 
-Policies can either be catagorized as a warning (using the `warn` rule) or a failure (using the `deny` or `violation` rules). By default, Conftest only returns an exit code of `1` when a policy has failed.
+Policies can either be categorized as a warning (using the `warn` rule) or a
+failure (using the `deny` or `violation` rules). By default, Conftest only
+returns an exit code of `1` when a policy has failed.
 
 The `--fail-on-warn` flag changes this behavior to the following:
 
@@ -138,7 +166,10 @@ The `--fail-on-warn` flag changes this behavior to the following:
 
 ## `--ignore`
 
-When a directory is given as an input, Conftest will recursively find, and test all files that it supports. To ignore certain directories or files, the `--ignore` flag takes a regexp pattern that will ignore directories and files that match the pattern.
+When a directory is given as an input, Conftest will recursively find, and test
+all files that it supports. To ignore certain directories or files, the
+`--ignore` flag takes a regexp pattern that will ignore directories and files
+that match the pattern.
 
 Here are some examples:
 
@@ -160,6 +191,9 @@ As of today Conftest supports the following output types:
 - [TAP](https://testanything.org/): `--output=tap`
 - Table `--output=table`
 - JUnit `--output=junit`
+- GitHub `--output=github`
+- AzureDevOps `--output=azuredevops`
+- SARIF `--output=sarif`
 
 ### Plaintext
 
@@ -257,11 +291,111 @@ $ conftest test -p examples/kubernetes/policy examples/kubernetes/service.yaml -
         </testsu
 ```
 
+### GitHub
+
+```console
+$ conftest test -o github -p examples/kubernetes/policy examples/kubernetes/deployment.yaml
+::group::Testing 'examples/kubernetes/deployment.yaml' against 5 policies in namespace 'main'
+::error file=examples/kubernetes/deployment.yaml,line=1::Containers must not run as root in Deployment hello-kubernetes
+::error file=examples/kubernetes/deployment.yaml,line=1::Deployment hello-kubernetes must provide app/release labels for pod selectors
+::error file=examples/kubernetes/deployment.yaml,line=1::hello-kubernetes must include Kubernetes recommended labels: https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels/#labels
+::error file=examples/kubernetes/deployment.yaml,line=1::Found deployment hello-kubernetes but deployments are not allowed
+success file=examples/kubernetes/deployment.yaml 1
+::endgroup::
+5 tests, 1 passed, 0 warnings, 4 failures, 0 exceptions
+```
+
+By default every input file is annotated, including files where all checks
+passed. Pass `--github-hide-passed` to skip the annotation group for input
+files whose checks all passed, keeping the output focused on actionable
+failures, warnings, exceptions, and skipped tests. The summary line still
+counts every test.
+
+```console
+$ conftest test -o github --github-hide-passed -p examples/kubernetes/policy examples/kubernetes/deployment.yaml
+::group::Testing 'examples/kubernetes/deployment.yaml' against 5 policies in namespace 'main'
+::error file=examples/kubernetes/deployment.yaml,line=1::Containers must not run as root in Deployment hello-kubernetes
+...
+::endgroup::
+5 tests, 1 passed, 0 warnings, 4 failures, 0 exceptions
+```
+
+Use Conftest directly to check incoming Pull Requests in GitHub:
+
+```yaml
+---
+name: Conftest
+
+on:
+  pull_request:
+    branches: 
+      - main
+
+jobs:
+  conftest:
+    runs-on: ubuntu-latest
+    container: openpolicyagent/conftest:latest
+    steps:
+      - name: Code checkout
+        uses: actions/checkout@v3
+      - name: Validate Kubernetes policy
+        run: |
+          conftest test -o github -p examples/kubernetes/policy examples/kubernetes/deployment.yaml
+```
+
+### Azure DevOps
+
+```console
+$ conftest test -o azuredevops -p examples/kubernetes/policy examples/kubernetes/deployment.yaml
+##[section]Testing 'examples/kubernetes/deployment.yaml' against 5 policies in namespace 'main'
+##[group]See conftest results
+##vso[task.logissue type=error] file=examples/kubernetes/deployment.yaml --> Containers must not run as root in Deployment hello-kubernetes
+##vso[task.logissue type=error] file=examples/kubernetes/deployment.yaml --> Deployment hello-kubernetes must provide app/release labels for pod selectors
+##vso[task.logissue type=error] file=examples/kubernetes/deployment.yaml --> hello-kubernetes must include Kubernetes recommended labels: https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels/#labels
+##vso[task.logissue type=error] file=examples/kubernetes/deployment.yaml --> Found deployment hello-kubernetes but deployments are not allowed
+success file=examples/kubernetes/deployment.yaml 1
+##[endgroup]
+5 tests, 1 passed, 0 warnings, 4 failures, 0 exceptions
+```
+
+### SARIF
+
+```console
+$ conftest test --proto-file-dirs examples/textproto/protos -p examples/textproto/policy examples/textproto/fail.textproto -o sarif
+{"version":"2.1.0","$schema":"https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json","runs":[{"tool":{"driver":{"informationUri":"https://github.com/open-policy-agent/conftest","name":"conftest","rules":[{"id":"main/deny","shortDescription":{"text":"Policy violation"}}]}},"invocations":[{"executionSuccessful":true,"exitCode":1,"exitCodeDescription":"Policy violations found"}],"results":[{"ruleId":"main/deny","ruleIndex":0,"level":"error","message":{"text":"fail: Power level must be over 9000"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"examples/textproto/fail.textproto"}}}]}]}]}
+```
+
+## `--trace`
+
+When debugging policies, it can be useful to see exactly how the policy is being
+evaluated. The `--trace` flag provides detailed output showing how the Rego
+queries are processed.
+
+**Important**: The `--trace` flag only works with the default standard output
+format (`--output=stdout`). When both `--trace` and `--output` are specified,
+the output format takes priority and tracing will not be used.
+
+Example usage:
+
+```console
+$ conftest test --trace deployment.yaml
+file: deployment.yaml | query: data.main.deny
+TRAC Enter data.main.deny = _
+TRAC | Eval data.main.deny = _
+TRAC | Index data.main.deny = _ matched 3 rules)
+TRAC | Enter data.main.deny
+TRAC | | Eval data.kubernetes.is_deployment
+...
+```
+
 ## `--parser`
 
-Conftest normally detects which parser to used based on the file extension of the file, even when multiple input files are passed in. However, it is possible force a specific parser to be used with the `--parser` flag.
+Conftest normally detects which parser to used based on the file extension of
+the file, even when multiple input files are passed in. However, it is possible
+force a specific parser to be used with the `--parser` flag.
 
-For the available parsers, take a look at [parsers](https://github.com/open-policy-agent/conftest/tree/master/parser).
+For the available parsers, take a look at
+[parsers](https://github.com/open-policy-agent/conftest/tree/master/parser).
 
 For instance:
 
@@ -271,13 +405,67 @@ $ conftest test -p examples/hcl1/policy examples/hcl1/gke.tf --parser hcl2
 2 tests, 2 passed, 0 warnings, 0 failures, 0 exceptions
 ```
 
+### Jenkins Pipeline and Groovy 2.4
+
+The `groovy` parser targets the Groovy 2.4 syntax used by Jenkins Pipeline CPS.
+It is intended for Jenkinsfiles and Groovy source loaded by Jenkins, rather
+than as a general-purpose parser for newer Groovy language versions.
+
+Files with a `.groovy` extension and files named `Jenkinsfile` or
+`Jenkinsfile.*` are detected automatically. Use `--parser groovy` when reading
+Groovy source from standard input.
+
+The parser exposes a concrete syntax tree to Rego. Interior nodes contain a
+syntax `kind`, a one-based source location, and their `children`. Token nodes
+contain their raw source `text` instead of children. For example:
+
+```json
+{
+  "kind": "FileNode",
+  "line": 1,
+  "column": 1,
+  "children": [
+    {
+      "kind": "ExpressionStmt",
+      "line": 1,
+      "column": 1,
+      "children": [
+        {
+          "kind": "IdentExpr",
+          "line": 1,
+          "column": 1,
+          "children": [
+            {
+              "kind": "Identifier",
+              "text": "pipeline",
+              "line": 1,
+              "column": 1
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+Comments, whitespace, end-of-file markers, and synthetic zero-width tokens are
+not included in the Rego input. Policies can use `walk()` to find syntax nodes
+without depending on their absolute depth in the tree.
+
 ## `--policy`
 
-Conftest will, by default, look for policies in the `policy` folder. This can be changed with the `--policy` (or `-p`) flag. 
+Conftest will, by default, look for policies in the `policy` folder. This can be
+changed with the `--policy` (or `-p`) flag.
 
-This flag can also be repeated, if you have multiple directories with policy files. For example one with organization-wide policies, and another one with team-specific policies. Keep in mind when using multiple directories that the rules are treated as if they had all been read from the same directory, so make sure any rules sharing the same name are compatible.
+This flag can also be repeated, if you have multiple directories with policy
+files. For example one with organization-wide policies, and another one with
+team-specific policies. Keep in mind when using multiple directories that the
+rules are treated as if they had all been read from the same directory, so make
+sure any rules sharing the same name are compatible.
 
 Read rules from the policy directory (default):
+
 ```console
 $ conftest test files/
 ```

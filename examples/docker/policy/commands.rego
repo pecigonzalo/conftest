@@ -1,6 +1,7 @@
 package commands
+import rego.v1
 
-denylist = [
+denylist := [
 	"apk",
 	"apt",
 	"pip",
@@ -8,10 +9,11 @@ denylist = [
 	"wget",
 ]
 
-deny[msg] {
+deny contains msg if {
+	some i
 	input[i].Cmd == "run"
 	val := input[i].Value
 	contains(val[_], denylist[_])
 
-	msg = sprintf("unallowed commands found %s", [val])
+	msg := sprintf("unallowed commands found %s", [val])
 }

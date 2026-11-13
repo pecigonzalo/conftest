@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/open-policy-agent/conftest/internal/runner"
 	"github.com/open-policy-agent/conftest/output"
+	"github.com/open-policy-agent/conftest/runner"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -14,8 +14,8 @@ import (
 const verifyDesc = `
 This command executes Rego unit tests.
 
-Any file with a '_test' postfix and '.rego' extension will be compiled and 
-any Rego tests inside of them will be executed. For more information on how 
+Any file with a '_test' postfix and '.rego' extension will be compiled and
+any Rego tests inside of them will be executed. For more information on how
 to write tests check out the Rego testing documentation:
 https://www.openpolicyagent.org/docs/latest/policy-testing/.
 
@@ -24,14 +24,14 @@ The location can be overridden with the '--policy' flag, e.g.:
 
 	$ conftest verify --policy <my-directory>
 
-Some policies are dependant on external data. This data is loaded in separately 
-from policies. The location of any data directory or file can be specified with 
+Some policies are dependant on external data. This data is loaded in separately
+from policies. The location of any data directory or file can be specified with
 the '--data' flag.
 
 	$ conftest verify --data <data-directory>
 
-If a directory is specified, it will be recursively searched for 
-any data files. Data will be made available in Rego based on 
+If a directory is specified, it will be recursively searched for
+any data files. Data will be made available in Rego based on
 the structure of the data that was loaded.
 
 For example, if a yaml file was loaded that had the structure:
@@ -53,6 +53,11 @@ When debugging policies it can be useful to use a more verbose policy evaluation
 the output will include a detailed trace of how the policy was evaluated, e.g.
 
 	$ conftest verify --trace
+
+Use '--report' to get a report of the results with a summary. You can scope down to output full or notes or failed evaluation events {full|notes|fails}.
+	'full' - outputs all of the trace events
+	'notes' - outputs the trace events with 'trace(msg)' calls
+	'fails' - outputs the trace events of the failed queries
 `
 
 // NewVerifyCommand creates a new verify command which allows users
@@ -62,8 +67,25 @@ func NewVerifyCommand(ctx context.Context) *cobra.Command {
 		Use:   "verify <path> [path [...]]",
 		Short: "Verify Rego unit tests",
 		Long:  verifyDesc,
-		PreRunE: func(cmd *cobra.Command, args []string) error {
-			flagNames := []string{"data", "no-color", "output", "policy", "trace"}
+		PreRunE: func(cmd *cobra.Command, _ []string) error {
+			flagNames := []string{
+				"data",
+				"no-color",
+				"output",
+				"policy",
+				"trace",
+				"report",
+				"quiet",
+				"junit-hide-message",
+				"github-hide-passed",
+				"capabilities",
+				"rego-version",
+				"strict",
+				"proto-file-dirs",
+				"show-builtin-errors",
+				"var-values",
+				"namespace",
+			}
 			for _, name := range flagNames {
 				if err := viper.BindPFlag(name, cmd.Flags().Lookup(name)); err != nil {
 					return fmt.Errorf("bind flag: %w", err)
@@ -72,23 +94,51 @@ func NewVerifyCommand(ctx context.Context) *cobra.Command {
 
 			return nil
 		},
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			var runner runner.VerifyRunner
 			if err := viper.Unmarshal(&runner); err != nil {
 				return fmt.Errorf("unmarshal parameters: %w", err)
 			}
 
-			results, err := runner.Run(ctx)
+			reportFlag := "report"
+			if runner.VarValues && !runner.IsReportOptionOn() {
+				runner.Report = "fails"
+				reportFlag = "var-values"
+			}
+
+			outputter := output.Get(runner.Output, output.Options{
+				NoColor:          runner.NoColor,
+				Tracing:          runner.Trace,
+				ShowSkipped:      true,
+				JUnitHideMessage: viper.GetBool("junit-hide-message"),
+				GitHubHidePassed: viper.GetBool("github-hide-passed"),
+				VarValues:        runner.VarValues,
+			})
+
+			var reporter output.Reporter
+			if runner.IsReportOptionOn() {
+				var ok bool
+				if reporter, ok = outputter.(output.Reporter); !ok {
+					return fmt.Errorf("%s flag is not supported with %s output", reportFlag, runner.Output)
+				}
+			}
+
+			results, raw, err := runner.Run(ctx)
 			if err != nil {
 				return fmt.Errorf("running verification: %w", err)
 			}
 
-			outputter := output.Get(runner.Output, output.Options{NoColor: runner.NoColor, Tracing: runner.Trace, ShowSkipped: true})
-			if err := outputter.Output(results); err != nil {
-				return fmt.Errorf("output results: %w", err)
+			exitCode := results.ExitCode()
+			if !runner.Quiet || exitCode != 0 {
+				if reporter != nil {
+					if err := reporter.Report(raw, runner.Report); err != nil {
+						return fmt.Errorf("report results: %w", err)
+					}
+				} else if err := outputter.Output(results); err != nil {
+					return fmt.Errorf("output results: %w", err)
+				}
 			}
 
-			exitCode := output.ExitCode(results)
 			if exitCode > 0 {
 				os.Exit(exitCode)
 			}
@@ -98,12 +148,24 @@ func NewVerifyCommand(ctx context.Context) *cobra.Command {
 	}
 
 	cmd.Flags().Bool("no-color", false, "Disable color when printing")
+	cmd.Flags().Bool("quiet", false, "Disable successful test output")
 	cmd.Flags().Bool("trace", false, "Enable more verbose trace output for Rego queries")
+	cmd.Flags().Bool("strict", false, "Enable strict mode for Rego policies")
+	cmd.Flags().String("report", "", "Shows output for Rego queries as a report with summary. Available options are {full|notes|fails}.")
+	cmd.Flags().Bool("show-builtin-errors", false, "Collect and return all encountered built-in errors")
 
 	cmd.Flags().StringP("output", "o", output.OutputStandard, fmt.Sprintf("Output format for conftest results - valid options are: %s", output.Outputs()))
+	cmd.Flags().Bool("junit-hide-message", false, "Do not include the violation message in the JUnit test name")
+	cmd.Flags().Bool("github-hide-passed", false, "In the GitHub output, skip input files whose checks all passed")
 
+	cmd.Flags().String("capabilities", "", "Path to JSON file that can restrict opa functionality against a given policy. Default: all operations allowed")
+	cmd.Flags().String("rego-version", "v1", "Which version of Rego syntax to use. Options: v0, v1")
 	cmd.Flags().StringSliceP("data", "d", []string{}, "A list of paths from which data for the rego policies will be recursively loaded")
 	cmd.Flags().StringSliceP("policy", "p", []string{"policy"}, "Path to the Rego policy files directory")
+
+	cmd.Flags().StringSlice("proto-file-dirs", []string{}, "A list of directories containing Protocol Buffer definitions")
+	cmd.Flags().Bool("var-values", false, "Show variables and values in failing test expressions")
+	cmd.Flags().StringSliceP("namespace", "n", []string{}, "Verify policies in specific namespaces. Supports glob wildcards (*, ?, [...]) where * matches any sequence of characters including dots (e.g. 'main.*'). When empty, all namespaces are verified")
 
 	return &cmd
 }

@@ -1,21 +1,24 @@
 package commands
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
-	"net/http"
 	"strings"
 
-	auth "github.com/deislabs/oras/pkg/auth/docker"
-	"github.com/deislabs/oras/pkg/content"
-	orascontext "github.com/deislabs/oras/pkg/context"
-	"github.com/deislabs/oras/pkg/oras"
+	"github.com/open-policy-agent/conftest/internal/registry"
 	"github.com/open-policy-agent/conftest/policy"
+	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"oras.land/oras-go/v2"
+	"oras.land/oras-go/v2/content"
+	"oras.land/oras-go/v2/errdef"
+	"oras.land/oras-go/v2/registry/remote"
 )
 
 const pushDesc = `
@@ -34,8 +37,8 @@ Optionally, specific directory can be passed as a second argument, e.g.:
 
 	$ conftest push instrumenta.azurecr.io/my-registry:v1 path/to/dir
 
-Conftest leverages the ORAS library under the hood. This allows arbitrary artifacts to 
-be stored in compatible OCI registries. Currently open policy agent bundles are supported by 
+Conftest leverages the ORAS library under the hood. This allows arbitrary artifacts to
+be stored in compatible OCI registries. Currently Open Policy Agent bundles are supported by
 the docker/distribution (https://github.com/docker/distribution) registry and by Azure.
 
 The policy location defaults to the policy directory in the local folder.
@@ -45,7 +48,6 @@ The location can be overridden with the '--policy' flag, e.g.:
 `
 
 const (
-	openPolicyAgentConfigMediaType      = "application/vnd.cncf.openpolicyagent.config.v1+json"
 	openPolicyAgentPolicyLayerMediaType = "application/vnd.cncf.openpolicyagent.policy.layer.v1+rego"
 	openPolicyAgentDataLayerMediaType   = "application/vnd.cncf.openpolicyagent.data.layer.v1+json"
 )
@@ -57,17 +59,27 @@ func NewPushCommand(ctx context.Context, logger *log.Logger) *cobra.Command {
 		Use:   "push <repository>",
 		Short: "Push OPA bundles to an OCI registry",
 		Long:  pushDesc,
-		Args:  cobra.ExactArgs(1),
-		PreRunE: func(cmd *cobra.Command, args []string) error {
+		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			if err := viper.BindPFlag("policy", cmd.Flags().Lookup("policy")); err != nil {
 				return fmt.Errorf("bind flag: %w", err)
 			}
-
+			if err := viper.BindPFlag("data", cmd.Flags().Lookup("data")); err != nil {
+				return fmt.Errorf("bind flag: %w", err)
+			}
+			if err := viper.BindPFlag("tls", cmd.Flags().Lookup("tls")); err != nil {
+				return fmt.Errorf("bind flag: %w", err)
+			}
+			if err := viper.BindPFlag("rego-version", cmd.Flags().Lookup("rego-version")); err != nil {
+				return fmt.Errorf("bind flag: %w", err)
+			}
 			return nil
 		},
 
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx = orascontext.Background()
+			if len(args) < 1 {
+				cmd.Usage() //nolint
+				return fmt.Errorf("missing required arguments")
+			}
 
 			repository := args[0]
 			if !strings.Contains(repository, "/") {
@@ -89,7 +101,17 @@ func NewPushCommand(ctx context.Context, logger *log.Logger) *cobra.Command {
 			}
 
 			logger.Printf("pushing bundle to: %s", repository)
-			manifest, err := pushBundle(ctx, repository, viper.GetString("policy"))
+
+			policyPath := viper.GetString("policy")
+			dataPath := viper.GetString("data")
+			if policyPath == "" && dataPath == "" {
+				return errors.New("either policy or data must be set")
+			}
+			if dataPath == "" {
+				dataPath = policyPath
+			}
+			regoVersion := viper.GetString("rego-version")
+			manifest, err := pushBundle(ctx, repository, policyPath, dataPath, regoVersion)
 			if err != nil {
 				return fmt.Errorf("push bundle: %w", err)
 			}
@@ -100,49 +122,105 @@ func NewPushCommand(ctx context.Context, logger *log.Logger) *cobra.Command {
 	}
 
 	cmd.Flags().StringP("policy", "p", "policy", "Directory to push as a bundle")
+	cmd.Flags().StringP("data", "d", "", "Directory containing data to include in the bundle, defaults to the value of the policy flag")
+	cmd.Flags().BoolP("tls", "s", true, "Use TLS to access the registry")
+	cmd.Flags().String("rego-version", "v1", "Which version of Rego syntax to use. Options: v0, v1")
 
 	return &cmd
 }
 
-func pushBundle(ctx context.Context, repository string, path string) (*ocispec.Descriptor, error) {
-	cli, err := auth.NewClient()
+func pushBundle(ctx context.Context, repository, policyPath, dataPath, regoVersion string) (*ocispec.Descriptor, error) {
+	dest, err := remote.NewRepository(repository)
 	if err != nil {
-		return nil, fmt.Errorf("get auth client: %w", err)
+		return nil, fmt.Errorf("constructing repository: %w", err)
 	}
 
-	resolver, err := cli.Resolver(ctx, http.DefaultClient, false)
-	if err != nil {
-		return nil, fmt.Errorf("docker resolver: %w", err)
+	if err := registry.SetupClient(dest); err != nil {
+		return nil, fmt.Errorf("setting up the registry client: %w", err)
 	}
 
-	memoryStore := content.NewMemoryStore()
-	layers, err := buildLayers(ctx, memoryStore, path)
+	layers, err := pushLayers(ctx, dest, policyPath, dataPath, regoVersion)
 	if err != nil {
-		return nil, fmt.Errorf("building layers: %w", err)
+		return nil, fmt.Errorf("pushing layers: %w", err)
 	}
 
-	extraOpts := []oras.PushOpt{oras.WithConfigMediaType(openPolicyAgentConfigMediaType)}
-	manifest, err := oras.Push(ctx, resolver, repository, memoryStore, layers, extraOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("pushing manifest: %w", err)
+	configBytes := []byte("{}")
+	configDesc := content.NewDescriptorFromBytes(oras.MediaTypeUnknownConfig, configBytes)
+
+	if err := dest.Push(ctx, configDesc, bytes.NewReader(configBytes)); err != nil && !errors.Is(err, errdef.ErrAlreadyExists) {
+		return nil, fmt.Errorf("pushing manifest conifg: %w", err)
 	}
 
-	return &manifest, nil
+	manifest := ocispec.Manifest{
+		Config:    configDesc,
+		Layers:    layers,
+		Versioned: specs.Versioned{SchemaVersion: 2},
+	}
+	manifestBytes, err := json.Marshal(manifest)
+	if err != nil {
+		return nil, fmt.Errorf("serializing manifest: %w", err)
+	}
+
+	manifestDesc := content.NewDescriptorFromBytes(ocispec.MediaTypeImageManifest, manifestBytes)
+	if err := dest.Push(ctx, manifestDesc, bytes.NewReader(manifestBytes)); err != nil && !errors.Is(err, errdef.ErrAlreadyExists) {
+		return nil, fmt.Errorf("pushing manifest conifg: %w", err)
+	}
+
+	afterLastSlash := repository[strings.LastIndex(repository, "/")+1:]
+	tag := afterLastSlash[strings.Index(afterLastSlash, ":")+1:]
+
+	if err := dest.Tag(ctx, manifestDesc, tag); err != nil && !errors.Is(err, errdef.ErrAlreadyExists) {
+		return nil, fmt.Errorf("tagging: %w", err)
+	}
+
+	return &manifestDesc, nil
 }
 
-func buildLayers(ctx context.Context, memoryStore *content.Memorystore, path string) ([]ocispec.Descriptor, error) {
-	engine, err := policy.LoadWithData(ctx, []string{path}, []string{path})
+func pushLayers(ctx context.Context, pusher content.Pusher, policyPath, dataPath, regoVersion string) ([]ocispec.Descriptor, error) {
+	var policyPaths []string
+	if policyPath != "" {
+		policyPaths = append(policyPaths, policyPath)
+	}
+	var dataPaths []string
+	if dataPath != "" {
+		dataPaths = append(dataPaths, dataPath)
+	}
+	capabilities, err := policy.LoadCapabilities("")
+	if err != nil {
+		return nil, fmt.Errorf("load capabilities: %w", err)
+	}
+	opts := policy.CompilerOptions{
+		Capabilities: capabilities,
+		RegoVersion:  regoVersion,
+	}
+	engine, err := policy.LoadWithData(policyPaths, dataPaths, opts)
 	if err != nil {
 		return nil, fmt.Errorf("load: %w", err)
 	}
 
 	var layers []ocispec.Descriptor
 	for path, contents := range engine.Policies() {
-		layers = append(layers, memoryStore.Add(path, openPolicyAgentPolicyLayerMediaType, []byte(contents)))
+		data := []byte(contents)
+		desc := content.NewDescriptorFromBytes(openPolicyAgentPolicyLayerMediaType, data)
+		desc.Annotations = map[string]string{
+			ocispec.AnnotationTitle: path,
+		}
+		if err := pusher.Push(ctx, desc, bytes.NewReader(data)); err != nil && !errors.Is(err, errdef.ErrAlreadyExists) {
+			return nil, fmt.Errorf("pushing policy layer: %w", err)
+		}
+		layers = append(layers, desc)
 	}
 
 	for path, contents := range engine.Documents() {
-		layers = append(layers, memoryStore.Add(path, openPolicyAgentDataLayerMediaType, []byte(contents)))
+		data := []byte(contents)
+		desc := content.NewDescriptorFromBytes(openPolicyAgentDataLayerMediaType, data)
+		desc.Annotations = map[string]string{
+			ocispec.AnnotationTitle: path,
+		}
+		if err := pusher.Push(ctx, desc, bytes.NewReader(data)); err != nil && !errors.Is(err, errdef.ErrAlreadyExists) {
+			return nil, fmt.Errorf("pushing data layer: %w", err)
+		}
+		layers = append(layers, desc)
 	}
 
 	return layers, nil

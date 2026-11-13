@@ -1,8 +1,10 @@
 package main
+import rego.v1
 
-denylist = ["openjdk"]
+denylist := ["openjdk"]
 
-deny[msg] {
+deny contains msg if {
+	some i
 	input[i].Cmd == "from"
 	val := input[i].Value
 	contains(val[i], denylist[_])

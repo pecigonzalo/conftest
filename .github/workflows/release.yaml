@@ -5,33 +5,198 @@ on:
     tags:
       - 'v*'
 
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: openpolicyagent/conftest
+  PLATFORMS: linux/amd64,linux/arm64
+
 jobs:
-  release:
+  check:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: checkout source
-        uses: actions/checkout@v2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v5
         with:
-          fetch-depth: 0
+          persist-credentials: false
+
+      # Validate the GoReleaser config before building anything so a bad
+      # config fails fast rather than after images have been pushed.
+      - name: check releaser config
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # ratchet:goreleaser/goreleaser-action@v7.3.0
+        with:
+          args: check
+          version: "~> v2"
+
+  docker-conftest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs:
+      - check
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: login to docker hub
-        uses: docker/login-action@v1
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # ratchet:docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_LOGIN }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: get version
         id: get-version
-        run: echo ::set-output name=VERSION::${GITHUB_REF#refs/tags/}
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
 
-      - name: push images
-        env:
-          VERSION: ${{ steps.get-version.outputs.VERSION }}
-        run: make push TAG=$VERSION
+      - name: setup docker buildx
+        run: docker buildx create --name conftestbuild --use
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # ratchet:docker/build-push-action@v7.4.0
+        with:
+          context: .
+          push: true
+          build-args: |
+            VERSION=${{ steps.get-version.outputs.VERSION }}
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.get-version.outputs.VERSION }}
+            ${{ env.IMAGE }}:latest
+          platforms: ${{ env.PLATFORMS }}
+
+  docker-examples:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs:
+      - check
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: login to docker hub
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # ratchet:docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_LOGIN }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: setup docker buildx
+        run: docker buildx create --name conftestbuild --use
+
+      - name: Build and push examples image
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # ratchet:docker/build-push-action@v7.4.0
+        with:
+          context: .
+          push: true
+          target: examples
+          tags: ${{ env.IMAGE }}:examples
+          platforms: ${{ env.PLATFORMS }}
+
+  attest-images:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    needs:
+      - docker-conftest
+      - docker-examples
+    steps:
+      - name: login to docker hub
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # ratchet:docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_LOGIN }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: attest conftest image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # ratchet:actions/attest-build-provenance@v4.2.2
+        with:
+          subject-name: docker.io/${{ env.IMAGE }}
+          subject-digest: ${{ needs.docker-conftest.outputs.digest }}
+          push-to-registry: true
+
+      - name: attest examples image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # ratchet:actions/attest-build-provenance@v4.2.2
+        with:
+          subject-name: docker.io/${{ env.IMAGE }}
+          subject-digest: ${{ needs.docker-examples.outputs.digest }}
+          push-to-registry: true
+
+  goreleaser:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # GoReleaser creates the GitHub release.
+    needs:
+      - check
+    steps:
+      - name: checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v5
+        with:
+          fetch-depth: 0 # Need to fetch the full history for the GoReleaser changelog.
+          persist-credentials: false
+
+      - name: setup go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # ratchet:actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: install syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # ratchet:anchore/sbom-action/download-syft@v0.24.2
+        with:
+          syft-version: v1.52.0
 
       - name: release
-        uses: goreleaser/goreleaser-action@v2
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # ratchet:goreleaser/goreleaser-action@v7.3.0
         with:
-          args: release --rm-dist
+          args: release --clean
+          version: "~> v2"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  attest-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Draft releases are only visible with write access.
+      id-token: write
+      attestations: write
+    needs:
+      - goreleaser
+    steps:
+      - name: download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release download "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --dir assets
+
+      - name: attest release assets
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # ratchet:actions/attest-build-provenance@v4.2.2
+        with:
+          subject-path: assets/*
+
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    needs:
+      - attest-images
+      - attest-release
+    steps:
+      - name: publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --draft=false
